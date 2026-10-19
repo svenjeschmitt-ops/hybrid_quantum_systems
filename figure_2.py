@@ -55,11 +55,11 @@ class figure_2:
         P_c = r * r.dag()
 
         P_u = [P_a,P_b,P_c]
-        return P_u, N, n0, n1
+        return P_u, N, n0, n1, u
 
     def figure_2a(self):
 
-        P_u, N, n0, n1 = self.projection()
+        P_u, N, n0, n1, u = self.projection()
 
         self.tunnelterm = n0 * n1.dag()+n1 * n0.dag()
 
@@ -90,7 +90,7 @@ class figure_2:
 
     def figure_2b(self):
         energies, states = self.energies_states(self.H_c_pl_term_1)
-        P_u, N, n0, n1 = self.projection()
+        P_u, N, n0, n1, u = self.projection()
         except_val =[]
         for row in states:
             # Each sector contains a flat array of Qobj eigenstates.
@@ -103,7 +103,7 @@ class figure_2:
         self.plot_set((0,1),N_g0,except_val[:,0])
 
     def figure_2c(self):
-        P, N , n0, n1 =self.projection()
+        P, N , n0, n1 , u=self.projection()
         t = np.linspace(0, 1.5, 1001)
 
         N_g0_del = 0.016
@@ -154,8 +154,49 @@ class figure_2:
             states.append(sta)
             
         return sector_energies, states
+
+    def figure_2d(self):
+        # Figure 2d sweeps pi-pulse length, with Omega * tau_pi = pi.
+        # Each point is the population at the END of a different pulse.
+        tau_pi = np.linspace(0, 3, 1001)  # ns
+        b, r, r_til = [qt.basis(3, i) for i in range(3)]
+        delta = 2 * np.pi * 1.32  # Fine-structure splitting, rad/ns
+
+        # Equal optical couplings reproduce the published curves.
+        coupling = r * b.dag() + r_til * b.dag()
+        # H/hbar = (Omega/2) * (coupling + coupling.dag())
+        #           + delta * |r_til><r_til|.
+        # Form H * tau_pi / hbar directly to avoid Omega = pi/tau_pi
+        # diverging at zero. The zero point is the short-pulse limit.
+        pulse_area = (np.pi / 2) * (coupling + coupling.dag())
+        populations = np.empty((len(tau_pi), 2))
+        for i, duration in enumerate(tau_pi):
+            generator = pulse_area + delta * duration * r_til.proj()
+            psi_final = (-1j * generator).expm() * b
+            populations[i] = [
+                qt.expect(r.proj(), psi_final),
+                qt.expect(r_til.proj(), psi_final),
+            ]
+
+        ax = self.axs[1, 1]
+        ax.plot(tau_pi, populations[:, 0], "b-", label=r"$43P_{1/2}$")
+        ax.plot(tau_pi, populations[:, 1], "b--", label=r"$43P_{3/2}$")
+        # Highlight the paper's operating point: tau_pi = 1 ns.
+        psi_1ns = (-1j * (pulse_area + delta * r_til.proj())).expm() * b
+        ax.plot(
+            [1, 1],
+            [qt.expect(r.proj(), psi_1ns), qt.expect(r_til.proj(), psi_1ns)],
+            "ro", markerfacecolor="none",
+        )
+        ax.set(
+            xlabel=r"$\tau_\pi^{(p)}$ (ns)", ylabel="Probability",
+            xlim=(0, 3), ylim=(0, 1.02),
+        )
+        ax.legend(fontsize="small")
+        return tau_pi, populations
+
     def H_c_calculation(self, N_g0):
-        P_u, N, n0, n1 = self.projection()
+        P_u, N, n0, n1, u= self.projection()
         identity = qt.qeye(2)
         tunnelterm = n0 * n1.dag() + n1 * n0.dag()
         C_total0 = C_g0 + C_j
@@ -188,4 +229,5 @@ test = figure_2()
 test.figure_2a()
 test.figure_2b()
 test.figure_2c()
+test.figure_2d()
 plt.show()       
