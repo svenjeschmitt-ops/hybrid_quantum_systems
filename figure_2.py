@@ -3,6 +3,9 @@ from scipy.constants import h, hbar, c, e
 from scipy.linalg import expm
 import qutip as qt
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle,Circle,Arc
+from qutip_qip.circuit import QubitCircuit
+
 I = qt.qeye(2)
 C_j = 30 * 10**(-18)
 delta = 1
@@ -195,6 +198,106 @@ class figure_2:
         ax.legend(fontsize="small")
         return tau_pi, populations
 
+    def figure_2f(self):
+        qc =QubitCircuit(2,num_cbits=1,reverse_states=False)
+
+        qc.add_gate("CNOT", controls=0, targets=1)
+        qc.add_gate("SNOT",targets=0)
+
+        qc.add_measurement("M0",targets=0,classical_store=0)
+        qc.add_gate(
+            "Z",
+            targets=1,
+            classical_controls=[0],
+            classical_control_value=1,
+        )
+            
+        # Custom circuit drawing.
+        ax = self.axs[2, 1]
+        ax.clear()
+
+        top, bottom = 1.8, 0
+        cx, hx, mx, zx = 1, 2, 3, 4.4
+        width, height = 0.55, 0.55
+
+        def line(xs, ys):
+            ax.plot(xs, ys, color="black", lw=1.4, zorder=1)
+
+        def gate(x, y, label=None):
+            ax.add_patch(Rectangle(
+                (x - width / 2, y - height / 2),
+                width, height,
+                facecolor="white", edgecolor="black",
+                lw=1.4, zorder=3,
+            ))
+            if label:
+                ax.text(
+                    x, y, label, ha="center", va="center",
+                    fontsize=13, zorder=4,
+                )
+
+        # Wires.
+        line([0, mx - width / 2], [top, top])
+        line([0, 5], [bottom, bottom])
+
+        # CNOT.
+        line([cx, cx], [bottom, top])
+        ax.plot(cx, top, "ko", markersize=9)
+        ax.add_patch(Circle(
+            (cx, bottom), 0.18, fill=False,
+            edgecolor="black", lw=1.4,
+        ))
+        line([cx - 0.18, cx + 0.18], [bottom, bottom])
+
+        gate(hx, top, r"$H$")
+
+        # Measurement symbol.
+        gate(mx, top)
+        ax.add_patch(Arc(
+            (mx, top - 0.13), 0.44, 0.32,
+            theta1=0, theta2=180, zorder=4,
+        ))
+        ax.annotate(
+            "", xy=(mx + 0.12, top + 0.2),
+            xytext=(mx - 0.06, top - 0.13),
+            arrowprops=dict(arrowstyle="-|>", color="black"),
+            zorder=4,
+        )
+        ax.text(mx, top - 0.5, r"$M$", ha="center")
+
+        # Measurement result controls Z.
+        for offset in (-0.045, 0.045):
+            line(
+                [mx + width / 2, zx + offset, zx + offset],
+                [top + offset, top + offset, bottom + height / 2],
+            )
+        gate(zx, bottom, r"$Z^M$")
+
+        # Stage boundaries.
+        for i, x in enumerate([0.5, 1.5, 2.5, 3.7]):
+            ax.axvline(
+                x, color="steelblue", lw=1,
+                linestyle=(0, (5, 4)), zorder=0,
+            )
+            ax.text(x + 0.08, -0.65, rf"$\Psi_{i}$", fontsize=11)
+
+        # Input and output endpoints.
+        for x, y, label in [
+            (0, top, r"$\psi_a$"),
+            (0, bottom, r"$|0\rangle$"),
+            (5, bottom, r"$\phi_c$"),
+        ]:
+            ax.plot(
+                x, y, "o", markerfacecolor="white",
+                markeredgecolor="black", markersize=6, zorder=5,
+            )
+            ax.text(x, y - 0.4, label, ha="center", fontsize=12)
+
+        ax.set(xlim=(-0.4, 5.5), ylim=(-0.8, 2.3))
+        ax.set_aspect("equal", adjustable="box")
+        ax.axis("off")
+
+
     def H_c_calculation(self, N_g0):
         P_u, N, n0, n1, u= self.projection()
         identity = qt.qeye(2)
@@ -230,4 +333,5 @@ test.figure_2a()
 test.figure_2b()
 test.figure_2c()
 test.figure_2d()
+test.figure_2f()
 plt.show()       
