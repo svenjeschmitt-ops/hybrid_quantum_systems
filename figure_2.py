@@ -158,6 +158,17 @@ class figure_2:
             
         return sector_energies, states
 
+    def hamiltonian_r_error(self,tau_pi):
+        b, r, r_til = [qt.basis(3, i) for i in range(3)]
+        delta = 2 * np.pi * 1.32  # Fine-structure splitting, rad/ns
+
+        # Equal optical couplings reproduce the published curves.
+        coupling = r * b.dag() + r_til * b.dag()
+        # H/hbar = (Omega/2) * (coupling + coupling.dag())
+        pulse_area = (np.pi / 2) * (coupling + coupling.dag())
+        generator = pulse_area + delta * tau_pi * r_til.proj()
+        return generator
+
     def figure_2d(self):
         # Figure 2d sweeps pi-pulse length, with Omega * tau_pi = pi.
         # Each point is the population at the END of a different pulse.
@@ -169,12 +180,11 @@ class figure_2:
         coupling = r * b.dag() + r_til * b.dag()
         # H/hbar = (Omega/2) * (coupling + coupling.dag())
         #           + delta * |r_til><r_til|.
-        # Form H * tau_pi / hbar directly to avoid Omega = pi/tau_pi
-        # diverging at zero. The zero point is the short-pulse limit.
+
         pulse_area = (np.pi / 2) * (coupling + coupling.dag())
         populations = np.empty((len(tau_pi), 2))
         for i, duration in enumerate(tau_pi):
-            generator = pulse_area + delta * duration * r_til.proj()
+            generator = self.hamiltonian_r_error(duration)
             psi_final = (-1j * generator).expm() * b
             populations[i] = [
                 qt.expect(r.proj(), psi_final),
@@ -297,6 +307,162 @@ class figure_2:
         ax.set_aspect("equal", adjustable="box")
         ax.axis("off")
 
+    def figure_2e(self):
+        # Times in ns; Hamiltonians represent H/hbar in rad/ns.
+        t1, t2, t3 = 1.0, 0.417, 1.0
+        Omega = np.pi / t1
+        delta_fs = 2 * np.pi * 1.32
+
+        a, b, r, rt = [qt.basis(4, i) for i in range(4)]
+        atoms = [a, b, r, rt]
+        n0, n1 = [qt.basis(2, i) for i in range(2)]
+        Ic = qt.qeye(2)
+        Ia = qt.qeye(4)
+
+        conversion = E_j / hbar * 1e-9
+
+        def charge_blocks(ng):
+            raw = self.H_c_calculation([ng])[0]
+
+            # Remove intrinsic atomic energies in an atomic rotating frame.
+            # Retain relative charging energies and Stark shifts.
+            return [
+                (
+                    raw[i]
+                    - (hbar * omega_u[i] / E_j) * Ic
+                ) * conversion
+                for i in range(3)
+            ]
+
+        def H_static(ng):
+            Ha, Hb, Hr = charge_blocks(ng)
+
+            # Approximation: same charge/Stark response for r and rt.
+            Hrt = Hr + delta_fs * Ic
+
+            return sum(
+                qt.tensor(atom.proj(), block)
+                for atom, block in zip(atoms, [Ha, Hb, Hr, Hrt])
+            )
+
+        H0 = H_static(0.0)
+        H_switch = H_static(0.484)
+
+        # Laser excitation operator in the 4 x 2 Hilbert space.
+        D = qt.tensor(
+            r * b.dag() + rt * b.dag(),
+            Ic,
+        )
+
+        # Two optical tones resonant with the charge-dependent transitions.
+        # These are residual frequencies in the chosen rotating frame.
+        _, Hb, Hr = charge_blocks(0.0)
+        detunings = np.array([
+            qt.expect(Hr - Hb, n0),
+            qt.expect(Hr - Hb, n1),
+        ])
+
+        def laser(t):
+            return (Omega / 2) * np.sum(
+                np.exp(-1j * detunings * t)
+            )
+
+        def laser_conj(t):
+            return np.conj(laser(t))
+
+        H_pulse = qt.QobjEvo([
+            H0,
+            [D, laser],
+            [D.dag(), laser_conj],
+        ])
+
+        # Charge-qubit relaxation and pure dephasing.
+        T1, T2 = 100.0, 10.0
+        gamma_phi = 1 / T2 - 1 / (2 * T1)
+
+        c_ops = [
+            qt.tensor(Ia, np.sqrt(1 / T1) * n0 * n1.dag()),
+            qt.tensor(Ia, np.sqrt(gamma_phi / 2) * qt.sigmaz()),
+        ]
+
+        inputs = [
+            qt.tensor(a, n0),
+            qt.tensor(a, n1),
+            qt.tensor(b, n0),
+            qt.tensor(b, n1),
+        ]
+
+        # Absolute times preserve the phases of the optical tones.
+        stages = [
+            (H_pulse,  [0.0, t1]),
+            (H_switch, [t1, t1 + t2]),
+            (H_pulse,  [t1 + t2, t1 + t2 + t3]),
+        ]
+
+        options = {
+            "atol": 1e-9,
+            "rtol": 1e-7,
+            "max_step": 0.001,
+            "nsteps": 100000,
+        }
+
+        probabilities = np.zeros((4, 4))
+        end_states = []
+
+        for i, psi in enumerate(inputs):
+            rho = psi.proj()
+
+            for H, times in stages:
+                result = qt.mesolve(
+                    H,
+                    rho,
+                    times,
+                    c_ops=c_ops,
+                    options=options,
+                )
+                rho = result.states[-1]
+
+            end_states.append(rho)
+
+            for j, output in enumerate(inputs):
+                probabilities[i, j] = qt.expect(output.proj(), rho)
+
+        # Replace the existing Figure 2e axes with a 3D subplot.
+        self.fig.delaxes(self.axs[2, 0])
+        ax = self.fig.add_subplot(3, 2, 5, projection="3d")
+        self.axs[2, 0] = ax
+
+        x, y = np.meshgrid(np.arange(4), np.arange(4))
+        heights = probabilities.ravel()  # rows=input, columns=output
+
+        ax.bar3d(
+            x.ravel(),
+            y.ravel(),
+            np.zeros(16),
+            0.65,
+            0.65,
+            heights,
+            color="goldenrod",
+            edgecolor="black",
+            shade=True,
+        )
+
+        labels = [
+            r"$|a,0\rangle$",
+            r"$|a,1\rangle$",
+            r"$|b,0\rangle$",
+            r"$|b,1\rangle$",
+        ]
+
+        ax.set_xticks(np.arange(4) + 0.325)
+        ax.set_yticks(np.arange(4) + 0.325)
+        ax.set_xticklabels(labels, fontsize=8)
+        ax.set_yticklabels(labels, fontsize=8)
+        ax.set_xlabel("Output")
+        ax.set_ylabel("Input")
+        ax.set_zlabel("Probability")
+        ax.set_zlim(0, 1)
+
 
     def H_c_calculation(self, N_g0):
         P_u, N, n0, n1, u= self.projection()
@@ -334,4 +500,5 @@ test.figure_2b()
 test.figure_2c()
 test.figure_2d()
 test.figure_2f()
+test.figure_2e()
 plt.show()       
