@@ -12,15 +12,11 @@ from tkinter import ttk, filedialog, messagebox
 from hybrid_settings import FIELDS, DEFAULTS, validate, derived
 
 MODES = [
-("All seven figures", []),
+("All four figures", []),
 ("Write and store", ["--run"]),
 ("Transmon-to-atom paper-style figure", ["--write-paper-figure"]),
 ("Six-panel scientific summary", ["--paper-figure"]),
-("Transmon-to-atom paper-style figure", ["--write-paper-figure"]),
-("Preparation leakage", ["--leakage-scan"]),
-("Hyperfine to transmon", ["--retrieve"]),
-("Rydberg to transmon", ["--retrieve","--source","rydberg"]),
-("Write-store-read round trip", ["--roundtrip"]),
+("Retrieval comparison (ideal / write-store-read)", ["--roundtrip"]),
 ]
 
 

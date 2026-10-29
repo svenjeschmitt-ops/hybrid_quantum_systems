@@ -273,6 +273,23 @@ def overlap(rho_a, target, U):
         qt.ket2dm(target), U * rho_a * U.dag()
     )))
 
+def results_table(ax, headers, rows, widths=None):
+    """Render a shared numeric summary without plot axes."""
+    ax.set_axis_off()
+    table = ax.table(cellText=rows, colLabels=headers, colWidths=widths,
+                     cellLoc="center", bbox=(0, 0.20, 1, 0.58))
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("#d0d5dc")
+        if row == 0:
+            cell.set_facecolor("#edf1f5")
+            cell.set_text_props(weight="bold")
+        elif row % 2:
+            cell.set_facecolor("#fafbfc")
+    return table
+
+
 def main(check=False, save=False):
     phase = calibrated_phase()
     U = memory_rotation(phase)
@@ -320,7 +337,11 @@ def main(check=False, save=False):
         print("Physical-state checks passed.")
         return
 
-    fig, axes = plt.subplots(3, 2, figsize=(13, 11))
+    fig = plt.figure(figsize=(13, 10), layout="constrained")
+    grid = fig.add_gridspec(3, 2, height_ratios=(1, 1, 0.45))
+    axes = np.array([[fig.add_subplot(grid[row, col]) for col in range(2)]
+                     for row in range(2)])
+    summary = fig.add_subplot(grid[2, :])
     x = np.linspace(0, MAP[1], 2501)
     axes[0, 0].plot(x, [flux(t) for t in x])
     axes[0, 0].set_ylabel("Flux / flux quantum")
@@ -338,18 +359,17 @@ def main(check=False, save=False):
         axes[1, 1].plot(ts[transfer], line[transfer], label=label)
     axes[1, 1].set_ylabel("Population / photon number")
     axes[1, 1].legend(fontsize=8, ncol=2)
-    store = ts >= MAP[1]
-    axes[2, 0].plot(ts[store] - MAP[1], fidelity[store])
-    axes[2, 0].set(xlabel="Storage time (us)", ylabel="Target-state overlap", ylim=(0, 1))
-    axes[2, 1].plot(ts[store] - MAP[1], coherence[store])
-    axes[2, 1].set(xlabel="Storage time (us)", ylabel="2 |hyperfine coherence|", ylim=(0, 1))
+    storage_duration = ts[-1] - ts[mapping_index]
+    summary.set_title("Final storage results")
+    results_table(summary,
+                  ["Storage duration (µs)", "Target-state overlap", r"Hyperfine coherence: $2|\rho_{h0,h1}|$"],
+                  [[f"{storage_duration:g}", f"{fidelity[-1]:.6f}", f"{coherence[-1]:.6f}"]])
     for ax in axes[:2].flat:
         ax.set_xlabel("Time (us)")
         for start, end in (PREP, TC, AC, MAP):
             ax.axvline(start, color="gray", alpha=0.15)
             ax.axvline(end, color="gray", alpha=0.15)
     fig.suptitle("Flux- and voltage-controlled hybrid quantum memory")
-    fig.tight_layout()
     output = Path(__file__).with_name("hybrid_controls.png")
     if save:
         fig.savefig(output, dpi=170)
@@ -620,30 +640,70 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         print(f"Step refinement overlap change: {abs(value-refined):.3e}")
         print("Phase-sensitive retrieval and step-refinement checks passed.")
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    axes[0, 0].plot(ts, [flux_read(t) for t in ts])
-    axes[0, 0].set_ylabel("Flux / flux quantum")
-    axes[0, 1].plot(ts, [voltage_read(t) for t in ts])
-    axes[0, 1].set_ylabel("Electrode voltage (V)")
-    for op, label in ((Pe, "Transmon e"), (n, "Cavity photons"),
-                      (Pr0, "r0"), (Pr1, "r1"), (Ph0, "h0"),
-                      (Ph1, "h1"), (Pwrong, "Wrong Rydberg"), (Plost, "Loss")):
-        axes[1, 0].plot(ts, np.real(qt.expect(op, states)), label=label)
-    axes[1, 0].set_ylabel("Population / photon number")
-    axes[1, 0].legend(fontsize=8, ncol=2)
-    axes[1, 1].plot(ts, raw, label="Transmon overlap (raw)")
-    axes[1, 1].plot(ts, corrected, label="Transmon overlap (calibrated)")
-    axes[1, 1].plot(ts, joint, label="Joint target overlap")
-    axes[1, 1].set(ylabel="Target overlap", ylim=(0, 1.03))
-    axes[1, 1].legend(fontsize=8)
-    for ax in axes.flat:
-        ax.set_xlabel("Retrieval time (us)")
+    # Compare the same read controls with two different initial joint states.
+    cases = [("After writing and storage" if roundtrip else
+              "Ideal memory initialization", ts, states, corrected, joint)]
+    ideal_metrics = None
+    if roundtrip:
+        ideal_ts, ideal_states, _, _, _ = evolve_read(
+            retrieval_initial(alpha, beta, source), source=source)
+        ideal_metrics = read_metrics(ideal_states, target, read_phase(source))
+        cases.insert(0, ("Ideal memory initialization", ideal_ts, ideal_states,
+                         ideal_metrics[1], ideal_metrics[2]))
+
+    fig = plt.figure(figsize=(14, 11), layout="constrained")
+    grid = fig.add_gridspec(3, 2, height_ratios=(1, 1, 1.15))
+    flux_axis = fig.add_subplot(grid[0, 0])
+    voltage_axis = fig.add_subplot(grid[0, 1])
+    detuning_axis = fig.add_subplot(grid[1, 0])
+    summary = fig.add_subplot(grid[1, 1])
+    flux_axis.plot(ts, [flux_read(t) for t in ts])
+    flux_axis.set(ylabel="Flux / flux quantum",
+                  title="Shared flux control" if roundtrip else "Flux control")
+    voltage_axis.plot(ts, [voltage_read(t) for t in ts])
+    voltage_axis.set(ylabel="Electrode voltage (V)",
+                     title="Shared voltage control" if roundtrip else "Voltage control")
+    # Use the retrieval controls, whose swap order is reversed from writing.
+    fields = np.array([voltage_read(t) / GAP_CM + STRAY_FIELD for t in ts])
+    transmon_detuning = np.array([transmon_frequency(flux_read(t)) - FC for t in ts])
+    atom_detuning = F_A_ZERO - FC + (K_R1 - K_R0) * fields**2
+    detuning_axis.plot(ts, transmon_detuning, label="Transmon")
+    detuning_axis.plot(ts, atom_detuning, label="Atom")
+    detuning_axis.set(ylabel="Detuning from cavity (MHz)", title="Retrieval detuning")
+    detuning_axis.legend()
+    summary.set_title("Final retrieval overlaps")
+    results_table(summary,
+                  ["Memory initialization", "Calibrated\ntransmon overlap", "Joint target\noverlap"],
+                  [["Ideal memory" if label == "Ideal memory initialization" else
+                    "After writing\nand storage", f"{case_corrected[-1]:.6f}",
+                    f"{case_joint[-1]:.6f}"]
+                   for label, _, _, case_corrected, case_joint in cases],
+                  widths=(0.38, 0.33, 0.29))
+    summary.text(0.5, 0.06, "Joint target: desired transmon, cavity vacuum, atom h0",
+                 transform=summary.transAxes, ha="center", fontsize=9)
+    population_axes = []
+    time_axes = [flux_axis, voltage_axis, detuning_axis]
+    for column, (label, case_ts, case_states, _, _) in enumerate(cases):
+        populations = fig.add_subplot(grid[2, column] if len(cases) > 1 else grid[2, :])
+        population_axes.append(populations)
+        time_axes.append(populations)
+        for op, name in ((Pe, "Transmon e"), (n, "Cavity photons"),
+                         (Pr0, "r0"), (Pr1, "r1"), (Ph0, "h0"),
+                         (Ph1, "h1"), (Pwrong, "Wrong Rydberg"), (Plost, "Loss")):
+            populations.plot(case_ts, np.real(qt.expect(op, case_states)), label=name)
+        populations.set(ylabel="Population / photon number", title=label)
+        populations.legend(fontsize=8, ncol=2)
+    # Match population scales without assuming photon number is bounded by one.
+    upper = max(ax.get_ylim()[1] for ax in population_axes)
+    for ax in population_axes:
+        ax.set_ylim(-0.03, max(1.03, upper))
+    for ax in time_axes:
+        ax.set(xlabel="Retrieval time (us)", xlim=(ts[0], ts[-1]))
         for _, (start, end) in stages:
             ax.axvline(start, color="gray", alpha=0.15)
             ax.axvline(end, color="gray", alpha=0.15)
-    title = "Write-store-read: retrieval segment" if roundtrip else f"Retrieval from {source}"
+    title = "Retrieval comparison: ideal memory vs. write-store-read" if roundtrip else f"Retrieval from {source}"
     fig.suptitle(title + " (illustrative, unoptimized controls)")
-    fig.tight_layout()
     stem = "hybrid_roundtrip" if roundtrip else f"hybrid_retrieval_{source}"
     output = Path(__file__).with_name(stem + ".png")
     if save:
@@ -652,6 +712,11 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
                    np.column_stack((ts, raw, corrected, joint, coherence)),
                    delimiter=",", comments="",
                    header="retrieval_time_us,raw_transmon_overlap,calibrated_transmon_overlap,joint_overlap,transmon_coherence")
+        if ideal_metrics is not None:
+            np.savetxt(output.with_name(stem + "_ideal.csv"),
+                       np.column_stack((ideal_ts, *ideal_metrics)),
+                       delimiter=",", comments="",
+                       header="retrieval_time_us,raw_transmon_overlap,calibrated_transmon_overlap,joint_overlap,transmon_coherence")
         print(f"Saved {output}")
 
 
@@ -856,7 +921,9 @@ def write_paper_figure(save=False, show=True):
     Joint outputs are exclusive; 'Other' includes residual excitation/loss.
     """
     durations = np.geomspace(0.0002, T_OPT, 45)
-    prep = np.asarray([isolated_preparation(d)[:, -1] for d in durations])
+    preparation = [isolated_preparation(d) for d in durations]
+    prep = np.asarray([populations[:, -1] for populations in preparation])
+    wrong_peak = np.asarray([populations[2].max() for populations in preparation])
     joint_outputs = [
         qt.tensor(g, qt.basis(NC, 0), h0),
         qt.tensor(g, qt.basis(NC, 0), h1),
@@ -889,11 +956,12 @@ def write_paper_figure(save=False, show=True):
         "axes.labelsize": 11, "xtick.direction": "in",
         "ytick.direction": "in", "xtick.top": True, "ytick.right": True,
     }):
-        fig = plt.figure(figsize=(15, 4.8), layout="constrained")
-        grid = fig.add_gridspec(1, 3)
+        fig = plt.figure(figsize=(13, 9), layout="constrained")
+        grid = fig.add_gridspec(2, 2)
         ax0 = fig.add_subplot(grid[0, 0])
-        ax1 = fig.add_subplot(grid[0, 1])
-        ax2 = fig.add_subplot(grid[0, 2], projection="3d")
+        ax_leak = fig.add_subplot(grid[0, 1])
+        ax1 = fig.add_subplot(grid[1, 0])
+        ax2 = fig.add_subplot(grid[1, 1], projection="3d")
         blue, black = "#3346c8", "#303030"
         ax0.semilogx(durations * 1000, prep[:, 1], color=blue,
                      label="Desired Rydberg")
@@ -909,6 +977,15 @@ def write_paper_figure(save=False, show=True):
                  f"Neighbor splitting: {F_WRONG_SPLIT/1000:.2f} GHz\n"
                  f"Relative dipole amplitude: {REL_WRONG_DIPOLE:g}",
                  transform=ax0.transAxes, ha="right", fontsize=8)
+
+        # A separate log panel resolves leakage too small for the linear plot.
+        ax_leak.loglog(durations * 1000, np.maximum(prep[:, 2], 1e-18),
+                       color=blue, ls="--", label="Wrong Rydberg at pulse end")
+        ax_leak.loglog(durations * 1000, np.maximum(wrong_peak, 1e-18),
+                       color="#b37c27", label="Peak wrong Rydberg (sampled)")
+        ax_leak.set(xlabel="Preparation pulse duration (ns)", ylabel="Population",
+                    title="Transient and final preparation leakage")
+        ax_leak.legend(fontsize=8)
 
         ax1.plot(ts, traces[1]["photon"], color="#b37c27", ls=":",
                  label="Cavity photons | input e")
@@ -938,9 +1015,10 @@ def write_paper_figure(save=False, show=True):
         ax2.view_init(elev=25, azim=-53)
         ax2.text2D(.0, .91, "Input atom h0; cavity vacuum\nOther: all remaining joint states",
                    transform=ax2.transAxes, fontsize=8)
+        ax_leak.text(-.11, 1.04, "b", transform=ax_leak.transAxes, fontsize=15, fontweight="bold")
         ax0.text(-.11, 1.04, "a", transform=ax0.transAxes, fontsize=15, fontweight="bold")
-        ax1.text(-.11, 1.04, "b", transform=ax1.transAxes, fontsize=15, fontweight="bold")
-        ax2.text2D(-.05, 1.04, "c", transform=ax2.transAxes, fontsize=15, fontweight="bold")
+        ax1.text(-.11, 1.04, "c", transform=ax1.transAxes, fontsize=15, fontweight="bold")
+        ax2.text2D(-.05, 1.04, "d", transform=ax2.transAxes, fontsize=15, fontweight="bold")
         fig.suptitle("Quantum-state transfer: transmon to atomic memory", fontsize=16)
         fig.supxlabel("Illustrative cavity-transfer model; parameters and timing are unoptimized. "
                       "Basis populations do not characterize phase fidelity.", fontsize=9)
@@ -952,6 +1030,7 @@ def write_paper_figure(save=False, show=True):
         np.savez(output.with_suffix(".npz"),
                  preparation_duration_us=durations,
                  preparation_final_populations=prep,
+                 preparation_wrong_peak=wrong_peak,
                  write_time_us=ts, write_basis_probabilities=table,
                  cavity_photons_input_e=traces[1]["photon"],
                  rydberg_r1_input_e=traces[1]["r1"],
@@ -966,10 +1045,7 @@ def all_figures(save=False):
     """Build every output before a single blocking show call."""
     jobs = [ # these are all the diffent experiment
         ("Write and store", lambda: main(save=save)),
-        ("Preparation leakage", lambda: leakage_scan(save=save)),
-        ("Hyperfine retrieval", lambda: retrieval_main(source="hyperfine", save=save)),
-        ("Rydberg retrieval", lambda: retrieval_main(source="rydberg", save=save)),
-        ("Write-store-read round trip", lambda: retrieval_main(roundtrip=True, save=save)),
+        ("Retrieval comparison", lambda: retrieval_main(roundtrip=True, save=save)),
         ("Six-panel scientific summary", lambda: paper_figure(save=save, show=False)),
         ("Transmon-to-atom paper-style figure", lambda: write_paper_figure(save=save, show=False)),
     ]
