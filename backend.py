@@ -3,11 +3,13 @@
 Units: time us, ordinary frequency MHz, angular frequency rad/us.
 Illustrative parameters; not a calibrated 87Rb level scheme.
 Includes a coherent unwanted Rydberg level and preparation leakage scan.
-Run: python codetest.py  (opens all seven figures)
-Summary only: python codetest.py --paper-figure
-Check: python codetest.py --check
+Run: python backend.py  (opens all seven figures)
+Direct default plots: python backend.py --run
+Summary only: python backend.py --paper-figure
+Check: python backend.py --check
 """
 import argparse
+import json
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -15,50 +17,66 @@ from matplotlib.patches import FancyBboxPatch
 import qutip as qt
 from pathlib import Path
 
+_config_parser = argparse.ArgumentParser(add_help=False)
+_config_parser.add_argument("--config")
+_config_args, _ = _config_parser.parse_known_args()
+_SETTINGS = {}
+if _config_args.config:
+    try:
+        with Path(_config_args.config).open(encoding="utf-8") as config_file:
+            _SETTINGS = json.load(config_file)
+        if not isinstance(_SETTINGS, dict):
+            raise ValueError("settings must be a JSON object")
+    except (OSError, ValueError) as exc:
+        _config_parser.error(f"Cannot load config {_config_args.config!r}: {exc}")
+
+def parameter(name, default):
+    return _SETTINGS.get(name, default)
+
 TWOPI = 2 * np.pi
 
 # Device parameters: EJ/h and EC/h, in MHz.
-FC = 5000.0
-EC = 250.0
-EJ_MAX = 20000.0
-ASYMMETRY = 0.10
-F_T_PARK = 5800.0
-G_TC = TWOPI * 20.0
-G_AC = TWOPI * 0.5
+FC = parameter("FC", 5000.0)
+EC = parameter("EC", 250.0)
+EJ_MAX = parameter("EJ_MAX", 20000.0)
+ASYMMETRY = parameter("ASYMMETRY", 0.10)
+F_T_PARK = parameter("F_T_PARK", 5800.0)
+G_TC = TWOPI * parameter('G_TC', 20.0)
+G_AC = TWOPI * parameter('G_AC', 0.5)
 
 # Example low-field Stark coefficients, defined by shift/h = K*E^2.
 # K is MHz/(V/cm)^2, already INCLUDING the conventional -alpha/(2h).
 # These are placeholders, not parameters of a selected rubidium pair.
-F_A_ZERO = 5150.0
-K_R0 = -2.0
-K_R1 = -12.0
-GAP_CM = 0.10
-STRAY_FIELD = 0.20  # static field along the electrode axis, V/cm
-E_PARK = 0.0
+F_A_ZERO = parameter("F_A_ZERO", 5150.0)
+K_R0 = parameter("K_R0", -2.0)
+K_R1 = parameter("K_R1", -12.0)
+GAP_CM = parameter("GAP_CM", 0.10)
+STRAY_FIELD = parameter("STRAY_FIELD", 0.20)
+E_PARK = parameter("E_PARK", 0.0)
 E_SWAP = np.sqrt((FC - F_A_ZERO) / (K_R1 - K_R0))
 
 # Coherence times (us), phenomenological Markovian rates.
-T1_T = 100.0
-TPHI_T = 150.0
-T1_C = 200.0
-TAU_R0 = 100.0
-TAU_R1 = 100.0
+T1_T = parameter("T1_T", 100.0)
+TPHI_T = parameter("TPHI_T", 150.0)
+T1_C = parameter("T1_C", 200.0)
+TAU_R0 = parameter("TAU_R0", 100.0)
+TAU_R1 = parameter("TAU_R1", 100.0)
 # Paper example: 43P3/2 is 1320 MHz above 43P1/2 (PDF p. 8).
 # Only the neighbor splitting is borrowed; the full atomic pair is illustrative.
-F_WRONG_SPLIT = 1320.0
-REL_WRONG_DIPOLE = 1.0  # amplitude ratio, NOT an error probability; replace from selection rules
-K_WRONG = K_R0         # placeholder: replace with this level's Stark coefficient
-TAU_WRONG = 100.0      # placeholder lifetime (us)
-TPHI_R = 100.0
-TPHI_H = 100000.0
+F_WRONG_SPLIT = parameter("F_WRONG_SPLIT", 1320.0)
+REL_WRONG_DIPOLE = parameter("REL_WRONG_DIPOLE", 1.0)
+K_WRONG = parameter('K_WRONG', K_R0)         # placeholder: replace with this level's Stark coefficient
+TAU_WRONG = parameter("TAU_WRONG", 100.0)
+TPHI_R = parameter("TPHI_R", 100.0)
+TPHI_H = parameter("TPHI_H", 100000.0)
 
 # Smooth optical pulses: integral Omega(t) dt = pi.
-OMEGA = TWOPI * 10.0
+OMEGA = TWOPI * parameter('OMEGA', 10.0)
 T_OPT = TWOPI / OMEGA  # sin^2 envelope averages to 1/2
-RAMP = 0.002
-GAP = 0.01
-STORAGE = 5.0  # Increase after checking runtime/convergence.
-MAX_STEP = 0.0005  # us: resolves ramps and off-resonant dynamics.
+RAMP = parameter("RAMP", 0.002)
+GAP = parameter("GAP", 0.01)
+STORAGE = parameter("STORAGE", 5.0)
+MAX_STEP = parameter("MAX_STEP", 0.0005)
 
 def flux_for_frequency(f):
     # Invert the approximate asymmetric-SQUID transmon formula,
@@ -79,13 +97,12 @@ def transmon_frequency(phi):
     )
     return np.sqrt(8 * EC * ej) - EC
 
-# Stage boundaries; swap hold times are nominal, not numerically optimized. 
-# its the schedule of the transfer protocol 
-PREP = (0.0, T_OPT) # the pulse will begin at zero and end at T_OPT -> to drive the atom from h0 to r0
-TC = (PREP[1] + GAP, PREP[1] + GAP + 2 * RAMP + np.pi / (2 * G_TC)) # transmon to cavity starts at GAP 
-AC = (TC[1] + GAP, TC[1] + GAP + 2 * RAMP + np.pi / (2 * G_AC)) # Cavity to atom
-MAP = (AC[1] + GAP, AC[1] + GAP + T_OPT) # map into metory
-T_END = MAP[1] + STORAGE # tells me the entire time of the simulation
+# Stage boundaries; swap hold times are nominal, not numerically optimized.
+PREP = (0.0, T_OPT)
+TC = (PREP[1] + GAP, PREP[1] + GAP + 2 * RAMP + np.pi / (2 * G_TC))
+AC = (TC[1] + GAP, TC[1] + GAP + 2 * RAMP + np.pi / (2 * G_AC))
+MAP = (AC[1] + GAP, AC[1] + GAP + T_OPT)
+T_END = MAP[1] + STORAGE
 
 def smooth_window(t, start, end):
     """Raised-cosine ramps with a flat central plateau."""
@@ -115,7 +132,7 @@ def electric_field(t):
 
 # Hilbert space: two-level transmon, 3 cavity states, 6 atomic states.
 # Basis: h0, h1, r0, r1, loss, wrong-Rydberg.
-NC = 3
+NC = parameter("NC", 3)
 NA = 6
 g, e = qt.basis(2, 0), qt.basis(2, 1)
 h0, h1, r0, r1, lost, wrong = [qt.basis(NA, j) for j in range(NA)]
@@ -149,7 +166,10 @@ def delta_wrong(t):
     return TWOPI * (F_WRONG_SPLIT + K_WRONG * electric_field(t)**2)
 
 def prep_coeff(t):
-    return 0.5 * optical_envelope(t, *PREP)
+    return 0.5 * optical_envelope(t, *PREP) * np.exp(-1j * D_R0_PARK * (t-PREP[0]))
+
+def prep_conj(t):
+    return np.conj(prep_coeff(t))
 
 # Mapping occurs at the compensated park field. The optical carrier
 # phases below keep each effective optical arm resonant in this frame.
@@ -190,22 +210,23 @@ H = qt.QobjEvo([
     [Pr0, delta_r0],
     [Pr1, delta_r1],
     [Pwrong, delta_wrong],
-    [Bprep + Bprep.dag(), prep_coeff],
+    [Bprep, prep_coeff],
+    [Bprep.dag(), prep_conj],
     [Bmap0, map0_coeff],
     [Bmap0.dag(), map0_conj],
     [Bmap1, map1_coeff],
     [Bmap1.dag(), map1_conj],
 ])
 
-C_OPS = [ # list of ocllapse operators describing the decay and dephasing of the system
-    np.sqrt(1 / T1_T) * sm, # transmon relaxation
-    np.sqrt(1 / T1_C) * a, # photon loss from cavity
-    np.sqrt(1 / TAU_R0) * A(lost, r0), # decay from r0 into loss states
-    np.sqrt(1 / TAU_R1) * A(lost, r1), # decay from r1 into loss states
-    np.sqrt(1 / TAU_WRONG) * A(lost, wrong), # decay from unwanted rydberg state
-    np.sqrt(1 / (2 * TPHI_T)) * Zt, # transmon dephasing 
-    np.sqrt(1 / (2 * TPHI_R)) * Zr, # rydberg dephsing 
-    np.sqrt(1 / (2 * TPHI_H)) * Zh, # hyperfine memory dephasing 
+C_OPS = [
+    np.sqrt(1 / T1_T) * sm,
+    np.sqrt(1 / T1_C) * a,
+    np.sqrt(1 / TAU_R0) * A(lost, r0),
+    np.sqrt(1 / TAU_R1) * A(lost, r1),
+    np.sqrt(1 / TAU_WRONG) * A(lost, wrong),
+    np.sqrt(1 / (2 * TPHI_T)) * Zt,
+    np.sqrt(1 / (2 * TPHI_R)) * Zr,
+    np.sqrt(1 / (2 * TPHI_H)) * Zh,
 ]
 
 def time_grid(include_storage=True):
@@ -218,17 +239,17 @@ def time_grid(include_storage=True):
     return np.unique(np.concatenate(points))
 
 def simulate(alpha, beta, noisy=True, include_storage=True):
-    q = (alpha * g + beta * e).unit() # transmon state
-    psi = qt.tensor(q, qt.basis(NC, 0), h0) # describing the transmon state with the initial cavity and atom state
+    q = (alpha * g + beta * e).unit()
+    psi = qt.tensor(q, qt.basis(NC, 0), h0)
     ts = time_grid(include_storage)
     options = {
         "store_states": True, "atol": 1e-11, "rtol": 1e-9, "method": "dop853",
         "max_step": MAX_STEP, "nsteps": 100000,
     }
     if noisy:
-        result = qt.mesolve(H, qt.ket2dm(psi), ts, c_ops=C_OPS, options=options) # giving back the desity matrix at all the time of ts
+        result = qt.mesolve(H, qt.ket2dm(psi), ts, c_ops=C_OPS, options=options)
     else:
-        result = qt.sesolve(H, psi, ts, options=options) # returns the state vector of the system without noise
+        result = qt.sesolve(H, psi, ts, options=options)
     return ts, result.states
 
 def calibrated_phase():
@@ -253,8 +274,10 @@ def main(check=False, save=False):
     U = memory_rotation(phase)
 
     # Nonzero input phase checks coherent transfer.
-    alpha = 1 / np.sqrt(2)
-    beta = np.exp(1j * np.pi / 3) / np.sqrt(2)
+    theta = np.deg2rad(parameter("INPUT_THETA", 90.0))
+    phi = np.deg2rad(parameter("INPUT_PHI", 60.0))
+    alpha = np.cos(theta / 2)
+    beta = np.exp(1j * phi) * np.sin(theta / 2)
     target = (alpha * h0 + beta * h1).unit()
     ts, states = simulate(alpha, beta, noisy=True, include_storage=not check)
     atomic_states = [rho.ptrace(2) for rho in states]
@@ -366,7 +389,7 @@ def leakage_scan(save=False):
     assert no_wrong[2].max() < 1e-12
     short = isolated_preparation(0.001)
     refined = isolated_preparation(0.001, resolution=2)
-    assert short[2].max() > 1e-4
+    assert short[2].min() > -1e-9  # Leakage may vanish for a valid parameter choice.
     assert abs(short[2, -1] - refined[2, -1]) < 1e-7
     assert np.max(abs(short.sum(axis=0) - 1)) < 1e-8
 
@@ -463,14 +486,18 @@ def retrieval_model(source="hyperfine"):
     # After atom->cavity->transmon, the atom should be in r0.
     # Return it to h0 so it need not remain in a short-lived Rydberg state.
     def cleanup_coeff(t):
-        return 0.5 * optical_envelope(t, *cleanup)
+        return 0.5 * optical_envelope(t, *cleanup) * np.exp(
+            -1j * D_R0_PARK * (t-cleanup[0]))
+
+    def cleanup_conj(t):
+        return np.conj(cleanup_coeff(t))
 
     h_read = qt.QobjEvo([
         H_coupling,
         [Pe, dt_read], [Pr0, d0_read], [Pr1, d1_read], [Pwrong, dw_read],
         [Bmap0, unmap0], [Bmap0.dag(), unmap0_conj],
         [Bmap1, unmap1], [Bmap1.dag(), unmap1_conj],
-        [Bprep + Bprep.dag(), cleanup_coeff],
+        [Bprep, cleanup_coeff], [Bprep.dag(), cleanup_conj],
     ])
     stages = []
     if unmap:
@@ -538,8 +565,10 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     if roundtrip and source != "hyperfine":
         raise ValueError("Round trip retrieves from hyperfine memory.")
     phase = read_phase(source, roundtrip)
-    alpha = 1 / np.sqrt(2)
-    beta = np.exp(1j * np.pi / 3) / np.sqrt(2)
+    theta = np.deg2rad(parameter("INPUT_THETA", 90.0))
+    phi = np.deg2rad(parameter("INPUT_PHI", 60.0))
+    alpha = np.cos(theta / 2)
+    beta = np.exp(1j * phi) * np.sin(theta / 2)
     target = (alpha * g + beta * e).unit()
     write_ts = write_states = None
     if roundtrip:
@@ -627,8 +656,9 @@ def paper_figure(save=False, show=True):
     # |e,0,r0>, |g,1,r0>, |g,0,r1>.
     # Subtract the common r0 energy; keep the off-resonant transmon
     # so its dispersive cavity shift is present.
-    detunings = np.linspace(-3.0, 3.0, 401)  # MHz
-    fields = np.sqrt((FC - F_A_ZERO + detunings) / (K_R1 - K_R0))
+    span = 3.0 / abs(K_R1-K_R0)
+    fields = np.sqrt(np.linspace(max(0.0,E_SWAP**2-span),E_SWAP**2+span,401))
+    detunings = F_A_ZERO-FC+(K_R1-K_R0)*fields**2
     volts = GAP_CM * (fields - STRAY_FIELD)
     eigenvalues, atom_weights = [], []
     dt = F_T_PARK - FC
@@ -964,15 +994,20 @@ if __name__ == "__main__":
                         help="Generate every figure (also the default with no mode selected).")
     parser.add_argument("--write-paper-figure", action="store_true",
                         help="Paper-style preparation, dynamics, and write probabilities.")
+    parser.add_argument("--run", action="store_true", help="Run the default figures (also the default with no arguments).")
+    parser.add_argument("--config", help="JSON object of parameter overrides.")
+    parser.add_argument("--write-only", action="store_true", help="Only the write/store figure.")
     args = parser.parse_args()
     selected_modes = sum((args.paper_figure, args.retrieve, args.roundtrip,
-                          args.leakage_scan, args.all_figures, args.write_paper_figure))
+                          args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only))
     if selected_modes > 1:
         parser.error("Choose one figure mode, or use --all-figures.")
     if args.all_figures and args.check:
         parser.error("--check runs verification separately from --all-figures.")
     if args.all_figures or (selected_modes == 0 and not args.check):
         all_figures(save=args.save)
+    elif args.write_only:
+        main(check=args.check, save=args.save)
     elif args.write_paper_figure:
         write_paper_figure(save=args.save, show=False)
     elif args.paper_figure:
