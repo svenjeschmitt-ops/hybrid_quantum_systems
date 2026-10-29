@@ -3,7 +3,7 @@
 Units: time us, ordinary frequency MHz, angular frequency rad/us.
 Illustrative parameters; not a calibrated 87Rb level scheme.
 Includes a coherent unwanted Rydberg level and preparation leakage scan.
-Run: python backend.py  (opens all seven figures)
+Run: python backend.py  (opens all six figures)
 Direct default plots: python backend.py --run
 Summary only: python backend.py --paper-figure
 Check: python backend.py --check
@@ -627,12 +627,20 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         axes[1, 0].plot(ts, np.real(qt.expect(op, states)), label=label)
     axes[1, 0].set_ylabel("Population / photon number")
     axes[1, 0].legend(fontsize=8, ncol=2)
-    axes[1, 1].plot(ts, raw, label="Transmon overlap (raw)")
-    axes[1, 1].plot(ts, corrected, label="Transmon overlap (calibrated)")
-    axes[1, 1].plot(ts, joint, label="Joint target overlap")
-    axes[1, 1].set(ylabel="Target overlap", ylim=(0, 1.03))
-    axes[1, 1].legend(fontsize=8)
-    for ax in axes.flat:
+    summary = axes[1, 1]
+    summary.set_axis_off()
+    summary.set_title("Final retrieval overlaps")
+    for y, label, value, color in (
+        (0.72, "Calibrated transmon overlap", corrected[-1], "tab:orange"),
+        (0.38, "Joint target overlap", joint[-1], "tab:green"),
+    ):
+        summary.text(0.5, y, label, transform=summary.transAxes,
+                     ha="center", va="center", fontsize=12)
+        summary.text(0.5, y - 0.13, f"{value:.6f}", transform=summary.transAxes,
+                     ha="center", va="center", fontsize=22, color=color)
+    summary.text(0.5, 0.04, "Joint target: desired transmon, cavity vacuum, atom h0",
+                 transform=summary.transAxes, ha="center", fontsize=9)
+    for ax in (axes[0, 0], axes[0, 1], axes[1, 0]):
         ax.set_xlabel("Retrieval time (us)")
         for _, (start, end) in stages:
             ax.axvline(start, color="gray", alpha=0.15)
@@ -852,7 +860,9 @@ def write_paper_figure(save=False, show=True):
     Joint outputs are exclusive; 'Other' includes residual excitation/loss.
     """
     durations = np.geomspace(0.0002, T_OPT, 45)
-    prep = np.asarray([isolated_preparation(d)[:, -1] for d in durations])
+    preparation = [isolated_preparation(d) for d in durations]
+    prep = np.asarray([populations[:, -1] for populations in preparation])
+    wrong_peak = np.asarray([populations[2].max() for populations in preparation])
     joint_outputs = [
         qt.tensor(g, qt.basis(NC, 0), h0),
         qt.tensor(g, qt.basis(NC, 0), h1),
@@ -885,11 +895,12 @@ def write_paper_figure(save=False, show=True):
         "axes.labelsize": 11, "xtick.direction": "in",
         "ytick.direction": "in", "xtick.top": True, "ytick.right": True,
     }):
-        fig = plt.figure(figsize=(15, 4.8), layout="constrained")
-        grid = fig.add_gridspec(1, 3)
+        fig = plt.figure(figsize=(13, 9), layout="constrained")
+        grid = fig.add_gridspec(2, 2)
         ax0 = fig.add_subplot(grid[0, 0])
-        ax1 = fig.add_subplot(grid[0, 1])
-        ax2 = fig.add_subplot(grid[0, 2], projection="3d")
+        ax_leak = fig.add_subplot(grid[0, 1])
+        ax1 = fig.add_subplot(grid[1, 0])
+        ax2 = fig.add_subplot(grid[1, 1], projection="3d")
         blue, black = "#3346c8", "#303030"
         ax0.semilogx(durations * 1000, prep[:, 1], color=blue,
                      label="Desired Rydberg")
@@ -905,6 +916,15 @@ def write_paper_figure(save=False, show=True):
                  f"Neighbor splitting: {F_WRONG_SPLIT/1000:.2f} GHz\n"
                  f"Relative dipole amplitude: {REL_WRONG_DIPOLE:g}",
                  transform=ax0.transAxes, ha="right", fontsize=8)
+
+        # A separate log panel resolves leakage too small for the linear plot.
+        ax_leak.loglog(durations * 1000, np.maximum(prep[:, 2], 1e-18),
+                       color=blue, ls="--", label="Wrong Rydberg at pulse end")
+        ax_leak.loglog(durations * 1000, np.maximum(wrong_peak, 1e-18),
+                       color="#b37c27", label="Peak wrong Rydberg (sampled)")
+        ax_leak.set(xlabel="Preparation pulse duration (ns)", ylabel="Population",
+                    title="Transient and final preparation leakage")
+        ax_leak.legend(fontsize=8)
 
         ax1.plot(ts, traces[1]["photon"], color="#b37c27", ls=":",
                  label="Cavity photons | input e")
@@ -934,9 +954,10 @@ def write_paper_figure(save=False, show=True):
         ax2.view_init(elev=25, azim=-53)
         ax2.text2D(.0, .91, "Input atom h0; cavity vacuum\nOther: all remaining joint states",
                    transform=ax2.transAxes, fontsize=8)
+        ax_leak.text(-.11, 1.04, "b", transform=ax_leak.transAxes, fontsize=15, fontweight="bold")
         ax0.text(-.11, 1.04, "a", transform=ax0.transAxes, fontsize=15, fontweight="bold")
-        ax1.text(-.11, 1.04, "b", transform=ax1.transAxes, fontsize=15, fontweight="bold")
-        ax2.text2D(-.05, 1.04, "c", transform=ax2.transAxes, fontsize=15, fontweight="bold")
+        ax1.text(-.11, 1.04, "c", transform=ax1.transAxes, fontsize=15, fontweight="bold")
+        ax2.text2D(-.05, 1.04, "d", transform=ax2.transAxes, fontsize=15, fontweight="bold")
         fig.suptitle("Quantum-state transfer: transmon to atomic memory", fontsize=16)
         fig.supxlabel("Illustrative cavity-transfer model; parameters and timing are unoptimized. "
                       "Basis populations do not characterize phase fidelity.", fontsize=9)
@@ -948,6 +969,7 @@ def write_paper_figure(save=False, show=True):
         np.savez(output.with_suffix(".npz"),
                  preparation_duration_us=durations,
                  preparation_final_populations=prep,
+                 preparation_wrong_peak=wrong_peak,
                  write_time_us=ts, write_basis_probabilities=table,
                  cavity_photons_input_e=traces[1]["photon"],
                  rydberg_r1_input_e=traces[1]["r1"],
@@ -962,7 +984,6 @@ def all_figures(save=False):
     """Build every output before a single blocking show call."""
     jobs = [
         ("Write and store", lambda: main(save=save)),
-        ("Preparation leakage", lambda: leakage_scan(save=save)),
         ("Hyperfine retrieval", lambda: retrieval_main(source="hyperfine", save=save)),
         ("Rydberg retrieval", lambda: retrieval_main(source="rydberg", save=save)),
         ("Write-store-read round trip", lambda: retrieval_main(roundtrip=True, save=save)),
