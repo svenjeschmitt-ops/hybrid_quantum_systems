@@ -33,9 +33,9 @@ from tkinter import ttk, filedialog, messagebox
 from hybrid_settings import FIELDS, DEFAULTS, validate, derived
 
 MODES = [
-("Both compact figures", []),
-("Write and store", ["--run"]),
-("Atom to transmon (after write/store)", ["--roundtrip"]),
+("Both transfer directions", []),
+("Transmon to atom", ["--write-only"]),
+("Atom to transmon", ["--roundtrip"]),
 ]
 
 
@@ -159,8 +159,6 @@ class ParameterPanel:
             self.temp_path=Path(f.name)
         mode_args=dict(MODES)[self.mode.get()]
         # An explicit --run bypasses the startup panel in the child.
-        if self.mode.get()=="Write and store":
-            mode_args=["--write-only"]
         command=[sys.executable,"-u",str(self.backend_path),
                  "--run","--config",str(self.temp_path),*mode_args]
         if self.save.get():

@@ -290,24 +290,28 @@ def results_table(ax, headers, rows, widths=None):
     return table
 
 
-def basis_probabilities(mode, roundtrip=False, source="hyperfine"):
-    """Exclusive final joint outcomes for the two logical basis inputs.
+def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None):
+    """Exclusive joint outcomes and coherent fidelity for g/e/+ inputs.
 
-    The correct joint-output probability is a basis-state fidelity; these
-    columns alone do not characterize transfer of arbitrary superpositions.
+    Columns are probabilities of orthogonal joint basis outputs. The separate
+    target-state fidelity also tests coherence for the equal superposition.
     """
     outputs = ([qt.tensor(g, qt.basis(NC, 0), h) for h in (h0, h1)]
                if mode == "write" else
                [qt.tensor(t, qt.basis(NC, 0), h0) for t in (g, e)])
-    labels, rows = [], []
+    labels, rows, fidelities = [], [], []
+    if phase is None:
+        phase = calibrated_phase() if mode == "write" else read_phase(source, roundtrip)
+    u = (qt.tensor(IT, IC, memory_rotation(phase)) if mode == "write" else
+         qt.tensor(IT + (np.exp(1j * phase) - 1) * e * e.dag(), IC, IA))
     cases = (True,) if roundtrip else (False,)
     for stored in cases:
-        for index, (alpha, beta) in enumerate(((1, 0), (0, 1))):
+        for index, (alpha, beta) in enumerate(((1, 0), (0, 1), (1/np.sqrt(2), 1/np.sqrt(2)))):
             print(f"Calculating {mode} basis input {index}"
                   + (" after write/store" if stored else "") + "…", flush=True)
             if mode == "write":
                 _, states = simulate(alpha, beta, include_storage=False)
-                label = ("g → h0", "e → h1")[index]
+                label = ("g → h0", "e → h1", "+ → +")[index]
             else:
                 if stored:
                     _, write_states = simulate(alpha, beta, include_storage=True)
@@ -315,30 +319,35 @@ def basis_probabilities(mode, roundtrip=False, source="hyperfine"):
                 else:
                     initial = retrieval_initial(alpha, beta, source)
                 _, states, _, _, _ = evolve_read(initial, source=source)
-                label = (("h0 → g", "h1 → e") if source == "hyperfine" else
-                         ("r0 → g", "r1 → e"))[index]
+                label = (("h0 → g", "h1 → e", "+ → +") if source == "hyperfine" else
+                         ("r0 → g", "r1 → e", "+ → +"))[index]
                 if roundtrip:
                     label += "\n" + ("After write/store" if stored else "Ideal memory")
             final = states[-1]
             probs = [float(np.real(qt.expect(qt.ket2dm(k), final))) for k in outputs]
             wrong = float(np.real(qt.expect(Pwrong, final)))
-            row = [probs[index], probs[1-index], wrong, 1-sum(probs)-wrong]
+            row = [*probs, wrong, 1-sum(probs)-wrong]
             assert min(row) >= -1e-7 and abs(sum(row)-1) < 1e-7
+            logical = ((alpha * h0 + beta * h1).unit() if mode == "write" else
+                       (alpha * g + beta * e).unit())
+            target = (qt.tensor(g, qt.basis(NC, 0), logical) if mode == "write" else
+                      qt.tensor(logical, qt.basis(NC, 0), h0))
+            rho = qt.ket2dm(final) if final.isket else final
+            fidelity = float(np.real(qt.expect(qt.ket2dm(target), u * rho * u.dag())))
+            assert -1e-7 <= fidelity <= 1+1e-7
             labels.append(label)
             rows.append(row)
-    return labels, np.asarray(rows)
+            fidelities.append(fidelity)
+    return labels, np.asarray(rows), np.asarray(fidelities)
 
 
 def plot_basis_columns(ax, labels, probabilities, title, mode="write"):
     """Original 3D input/output columns, with fixed joint-output rows."""
     for i, row in enumerate(probabilities):
-        correct = i % 2
-        # Stored rows use target/other ordering; display fixed output states.
-        outputs = [row[0], row[1]] if correct == 0 else [row[1], row[0]]
-        outputs.append(row[2] + row[3])
+        outputs = [row[0], row[1], row[2] + row[3]]
         for j, value in enumerate(outputs):
             ax.bar3d(i-.23, j-.23, 0, .46, .46, max(value, 0),
-                     color="#c3ce48" if j == correct else "#c89b32",
+                     color="#c3ce48" if (i < 2 and j == i) or (i == 2 and j < 2) else "#c89b32",
                      edgecolor="#4b4934", linewidth=.5, shade=True, alpha=.93)
     input_labels = [label.split(" →")[0] for label in labels]
     ax.set_xticks(np.arange(len(labels)), input_labels)
@@ -455,13 +464,14 @@ def main(check=False, save=False):
     population_axis.legend(fontsize=8, ncol=2)
     storage_duration = ts[-1] - ts[mapping_index]
     plot_preparation_probabilities(wrong_axis)
-    labels, probabilities = basis_probabilities("write")
-    plot_basis_columns(basis_axis, labels, probabilities, "Write basis states (end of mapping)")
+    labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase)
+    plot_basis_columns(basis_axis, labels, probabilities, "Write inputs (end of mapping)")
     fig.supxlabel(f"Selected input after {storage_duration:g} µs storage: "
                   f"phase-corrected overlap = {fidelity[-1]:.6f}; "
                   f"coherence = {coherence[-1]:.6f}.\n"
-                  "Olive: target basis-state fidelity. Other: all remaining joint states.\n"
-                  "Joint targets: |g,0,h0⟩ / |g,0,h1⟩; basis populations do not test relative phase.",
+                  f"Phase-corrected joint fidelities: g={input_fidelities[0]:.4f}, "
+                  f"e={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.\n"
+                  "+ = equal coherent superposition; olive: intended logical outputs; Other: remaining joint states.",
                   fontsize=9)
     for ax in (control_axis, detuning_axis, population_axis):
         ax.set_xlabel("Time (us)")
@@ -800,17 +810,20 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     detuning_axis.set(title="Detuning from cavity", ylabel="Detuning (MHz)")
     detuning_axis.legend(fontsize=8)
     plot_preparation_probabilities(wrong_axis)
-    labels, probabilities = basis_probabilities("read", roundtrip, source)
+    labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
     for index, (label, _, _, _, _) in enumerate(cases):
         basis_axis = fig.add_subplot(bottom_grid[0, index + 1], projection="3d")
-        selection = slice(2 * index, 2 * index + 2)
+        selection = slice(3 * index, 3 * index + 3)
         title = "Retrieval: " + ("after write/store" if roundtrip else source)
         plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title, mode="read")
+        basis_axis.set_box_aspect((4, 4, 3), zoom=1.12)
     summary_lines = [f"{label}: selected-input overlap = {case_corrected[-1]:.6f}; "
                      f"joint overlap = {case_joint[-1]:.6f}"
                      for label, _, _, case_corrected, case_joint in cases]
     summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
-    summary_lines.append("Olive: target basis-state fidelity. Other: all remaining joint states.")
+    summary_lines.append(f"Phase-corrected joint fidelities: input 0={input_fidelities[0]:.4f}, "
+                         f"input 1={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.")
+    summary_lines.append("+ = equal coherent superposition; olive: intended logical outputs; Other: remaining joint states.")
     fig.supxlabel("\n".join(summary_lines), fontsize=9)
     population_axes = []
     time_axes = [flux_axis, detuning_axis]
