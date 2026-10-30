@@ -1,4 +1,4 @@
-"""Native startup parameter panel. Keep beside codetest.py and hybrid_settings.py."""
+"""Native startup parameter panel. Keep beside backend.py and hybrid_settings.py."""
 import json
 import os
 from pathlib import Path
@@ -7,16 +7,35 @@ import subprocess
 import sys
 import tempfile
 import threading
+
+
+def configure_tk_libraries():
+    """Find Tcl/Tk bundled with the base interpreter when running in a venv.
+
+    Relocatable Python builds can retain a build-time Tcl search path. Use
+    their own runtime scripts rather than scripts from another Python install.
+    Explicit TCL_LIBRARY/TK_LIBRARY settings remain authoritative.
+    """
+    library_root = Path(sys.base_prefix) / "lib"
+    for variable, pattern, script in (("TCL_LIBRARY", "tcl*", "init.tcl"),
+                                       ("TK_LIBRARY", "tk*", "tk.tcl")):
+        if variable not in os.environ:
+            for directory in sorted(library_root.glob(pattern)):
+                if (directory / script).is_file():
+                    os.environ[variable] = str(directory)
+                    break
+
+
+configure_tk_libraries()
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from hybrid_settings import FIELDS, DEFAULTS, validate, derived
 
 MODES = [
-("All four figures", []),
+("Both compact figures", []),
 ("Write and store", ["--run"]),
-("Transmon-to-atom paper-style figure", ["--write-paper-figure"]),
-("Six-panel scientific summary", ["--paper-figure"]),
-("Retrieval comparison (ideal / write-store-read)", ["--roundtrip"]),
+("Atom to transmon (after write/store)", ["--roundtrip"]),
 ]
 
 

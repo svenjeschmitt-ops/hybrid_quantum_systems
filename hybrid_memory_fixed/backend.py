@@ -290,6 +290,83 @@ def results_table(ax, headers, rows, widths=None):
     return table
 
 
+def basis_probabilities(mode, roundtrip=False, source="hyperfine"):
+    """Exclusive final joint outcomes for the two logical basis inputs.
+
+    The correct joint-output probability is a basis-state fidelity; these
+    columns alone do not characterize transfer of arbitrary superpositions.
+    """
+    outputs = ([qt.tensor(g, qt.basis(NC, 0), h) for h in (h0, h1)]
+               if mode == "write" else
+               [qt.tensor(t, qt.basis(NC, 0), h0) for t in (g, e)])
+    labels, rows = [], []
+    cases = (True,) if roundtrip else (False,)
+    for stored in cases:
+        for index, (alpha, beta) in enumerate(((1, 0), (0, 1))):
+            print(f"Calculating {mode} basis input {index}"
+                  + (" after write/store" if stored else "") + "…", flush=True)
+            if mode == "write":
+                _, states = simulate(alpha, beta, include_storage=False)
+                label = ("g → h0", "e → h1")[index]
+            else:
+                if stored:
+                    _, write_states = simulate(alpha, beta, include_storage=True)
+                    initial = write_states[-1]
+                else:
+                    initial = retrieval_initial(alpha, beta, source)
+                _, states, _, _, _ = evolve_read(initial, source=source)
+                label = (("h0 → g", "h1 → e") if source == "hyperfine" else
+                         ("r0 → g", "r1 → e"))[index]
+                if roundtrip:
+                    label += "\n" + ("After write/store" if stored else "Ideal memory")
+            final = states[-1]
+            probs = [float(np.real(qt.expect(qt.ket2dm(k), final))) for k in outputs]
+            wrong = float(np.real(qt.expect(Pwrong, final)))
+            row = [probs[index], probs[1-index], wrong, 1-sum(probs)-wrong]
+            assert min(row) >= -1e-7 and abs(sum(row)-1) < 1e-7
+            labels.append(label)
+            rows.append(row)
+    return labels, np.asarray(rows)
+
+
+def plot_basis_columns(ax, labels, probabilities, title, mode="write"):
+    """Original 3D input/output columns, with fixed joint-output rows."""
+    for i, row in enumerate(probabilities):
+        correct = i % 2
+        # Stored rows use target/other ordering; display fixed output states.
+        outputs = [row[0], row[1]] if correct == 0 else [row[1], row[0]]
+        outputs.append(row[2] + row[3])
+        for j, value in enumerate(outputs):
+            ax.bar3d(i-.23, j-.23, 0, .46, .46, max(value, 0),
+                     color="#c3ce48" if j == correct else "#c89b32",
+                     edgecolor="#4b4934", linewidth=.5, shade=True, alpha=.93)
+    input_labels = [label.split(" →")[0] for label in labels]
+    ax.set_xticks(np.arange(len(labels)), input_labels)
+    ax.set_yticks([0, 1, 2], ["g,0,h0", "g,0,h1" if mode == "write" else "e,0,h0", "Other"])
+    ax.set(xlabel="Transmon input" if mode == "write" else "Memory input",
+           ylabel="Joint output", zlabel="Probability", zlim=(0, 1), title=title)
+    ax.tick_params(labelsize=7, pad=1)
+    ax.xaxis.labelpad = 5
+    ax.yaxis.labelpad = 6
+    ax.xaxis.label.set_size(9)
+    ax.yaxis.label.set_size(9)
+    ax.zaxis.label.set_size(9)
+    ax.set_title(title, fontsize=10, pad=8)
+    ax.view_init(elev=25, azim=-53)
+
+
+def plot_wrong_population(ax, cases, xlabel):
+    for label, times, states in cases:
+        values = np.real(qt.expect(Pwrong, states))
+        # A display floor keeps zeros visible on a logarithmic axis.
+        ax.semilogy(times, np.maximum(values, 1e-16), label=label)
+        print(f"{label}: wrong Rydberg final={values[-1]:.6e}, "
+              f"sampled peak={values.max():.6e}", flush=True)
+    ax.set(xlabel=xlabel, ylabel="Wrong-Rydberg probability",
+           title="Wrong Rydberg (display floor 10⁻¹⁶)")
+    ax.legend(fontsize=8)
+
+
 def main(check=False, save=False):
     phase = calibrated_phase()
     U = memory_rotation(phase)
@@ -337,39 +414,62 @@ def main(check=False, save=False):
         print("Physical-state checks passed.")
         return
 
-    fig = plt.figure(figsize=(13, 10), layout="constrained")
-    grid = fig.add_gridspec(3, 2, height_ratios=(1, 1, 0.45))
-    axes = np.array([[fig.add_subplot(grid[row, col]) for col in range(2)]
-                     for row in range(2)])
-    summary = fig.add_subplot(grid[2, :])
+    fig = plt.figure(figsize=(12, 10), layout="constrained")
+    grid = fig.add_gridspec(3, 2)
+    control_axis = fig.add_subplot(grid[0, 0])
+    voltage_axis = control_axis.twinx()
+    detuning_axis = fig.add_subplot(grid[0, 1])
+    population_axis = fig.add_subplot(grid[1, :])
+    wrong_axis = fig.add_subplot(grid[2, 0])
+    basis_axis = fig.add_subplot(grid[2, 1], projection="3d")
     x = np.linspace(0, MAP[1], 2501)
-    axes[0, 0].plot(x, [flux(t) for t in x])
-    axes[0, 0].set_ylabel("Flux / flux quantum")
-    axes[0, 1].plot(x, [electrode_voltage(t) for t in x])
-    axes[0, 1].set_ylabel("Electrode voltage (V)")
-    axes[1, 0].plot(x, [delta_t(t) / TWOPI for t in x], label="Transmon")
-    axes[1, 0].plot(
-        x, [(delta_r1(t) - delta_r0(t)) / TWOPI for t in x], label="Atom"
+    flux_line, = control_axis.plot(x, [flux(t) for t in x],
+                                   color="tab:blue", label="Flux (left axis)")
+    voltage_line, = voltage_axis.plot(x, [electrode_voltage(t) for t in x],
+                                     color="tab:orange", linestyle="--",
+                                     label="Voltage (right axis)")
+    control_axis.set_ylabel("Flux / flux quantum", color="tab:blue")
+    voltage_axis.set_ylabel("Electrode voltage (V)", color="tab:orange")
+    control_axis.tick_params(axis="y", colors="tab:blue")
+    voltage_axis.tick_params(axis="y", colors="tab:orange")
+    control_axis.spines["left"].set_color("tab:blue")
+    voltage_axis.spines["right"].set_color("tab:orange")
+    control_axis.set_title("Flux and voltage control")
+    voltage_axis.legend(handles=[flux_line, voltage_line], loc="upper center",
+                        bbox_to_anchor=(0.5, 0.88), ncol=2, fontsize=8,
+                        framealpha=1)
+    detuning_axis.plot(x, [delta_t(t) / TWOPI for t in x],
+                       color="tab:blue", label="Transmon")
+    detuning_axis.plot(
+        x, [(delta_r1(t) - delta_r0(t)) / TWOPI for t in x],
+        color="tab:orange", linestyle="--", label="Atom"
     )
-    axes[1, 0].set_ylabel("Detuning from cavity (MHz)")
-    axes[1, 0].legend()
+    detuning_axis.axhline(0, color="gray", linewidth=.7, alpha=.5)
+    detuning_axis.set(title="Detuning from cavity", ylabel="Detuning (MHz)")
+    detuning_axis.legend(fontsize=8)
     transfer = ts <= MAP[1]
     for line, label in zip(pops, ("Transmon e", "Cavity photons", "h0", "h1",
                                   "r0", "r1", "Loss", "Wrong Rydberg")):
-        axes[1, 1].plot(ts[transfer], line[transfer], label=label)
-    axes[1, 1].set_ylabel("Population / photon number")
-    axes[1, 1].legend(fontsize=8, ncol=2)
+        population_axis.plot(ts[transfer], line[transfer], label=label)
+    population_axis.set(ylabel="Population / photon number", title="Write transfer dynamics")
+    population_axis.legend(fontsize=8, ncol=2)
     storage_duration = ts[-1] - ts[mapping_index]
-    summary.set_title("Final storage results")
-    results_table(summary,
-                  ["Storage duration (µs)", "Target-state overlap", r"Hyperfine coherence: $2|\rho_{h0,h1}|$"],
-                  [[f"{storage_duration:g}", f"{fidelity[-1]:.6f}", f"{coherence[-1]:.6f}"]])
-    for ax in axes[:2].flat:
+    plot_preparation_probabilities(wrong_axis)
+    labels, probabilities = basis_probabilities("write")
+    plot_basis_columns(basis_axis, labels, probabilities, "Write basis states (end of mapping)")
+    fig.supxlabel(f"Selected input after {storage_duration:g} µs storage: "
+                  f"phase-corrected overlap = {fidelity[-1]:.6f}; "
+                  f"coherence = {coherence[-1]:.6f}.\n"
+                  "Olive: target basis-state fidelity. Other: all remaining joint states.\n"
+                  "Joint targets: |g,0,h0⟩ / |g,0,h1⟩; basis populations do not test relative phase.",
+                  fontsize=9)
+    for ax in (control_axis, detuning_axis, population_axis):
         ax.set_xlabel("Time (us)")
         for start, end in (PREP, TC, AC, MAP):
             ax.axvline(start, color="gray", alpha=0.15)
             ax.axvline(end, color="gray", alpha=0.15)
-    fig.suptitle("Flux- and voltage-controlled hybrid quantum memory")
+    fig.suptitle("Transmon to atom")
+    fig.canvas.manager.set_window_title("Transmon to atom")
     output = Path(__file__).with_name("hybrid_controls.png")
     if save:
         fig.savefig(output, dpi=170)
@@ -396,6 +496,32 @@ def isolated_preparation(duration, dipole_ratio=REL_WRONG_DIPOLE,
                  "max_step": step, "nsteps": 100000},
     )
     return np.array(result.expect)
+
+
+def plot_preparation_probabilities(ax):
+    """Final populations versus duration of an isolated, equal-area π pulse.
+
+    Vary the peak drive with duration to keep the pulse area fixed, matching
+    isolated_preparation; this is a pulse scan, not a time-evolution trace.
+    """
+    durations = np.linspace(0.00002, 0.003, 81)  # 0.02–3 ns; no zero-duration pulse
+    populations = np.asarray([isolated_preparation(t)[:, -1] for t in durations])
+    assert np.all(populations >= -1e-8)
+    assert np.allclose(populations.sum(axis=1), 1, atol=1e-8)
+    ax.plot(durations * 1000, populations[:, 1], color="blue",
+            label="Desired Rydberg (r0)")
+    ax.plot(durations * 1000, populations[:, 2], color="blue", linestyle="--",
+            label="Wrong Rydberg")
+    marked = isolated_preparation(0.001)[:, -1]
+    ax.plot([1, 1], marked[[1, 2]], linestyle="none", marker="o",
+            markerfacecolor="none", markeredgecolor="red", markersize=5)
+    ax.set(xlabel="Preparation pulse duration (ns)", ylabel="Final probability",
+           xlim=(0, 3), ylim=(-.02, 1.02), title="Rydberg preparation: pulse-duration scan")
+    ax.tick_params(direction="in", top=True, right=True)
+    ax.legend(loc="center right", fontsize=8)
+    ax.text(.97, .24, f"Splitting: {F_WRONG_SPLIT / 1000:g} GHz\n"
+            "Isolated equal-area π pulses", transform=ax.transAxes,
+            ha="right", fontsize=8)
 
 
 def leakage_scan(save=False):
@@ -640,51 +766,56 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         print(f"Step refinement overlap change: {abs(value-refined):.3e}")
         print("Phase-sensitive retrieval and step-refinement checks passed.")
 
-    # Compare the same read controls with two different initial joint states.
+    # The round trip uses only the complete state after writing and storage.
     cases = [("After writing and storage" if roundtrip else
               "Ideal memory initialization", ts, states, corrected, joint)]
-    ideal_metrics = None
-    if roundtrip:
-        ideal_ts, ideal_states, _, _, _ = evolve_read(
-            retrieval_initial(alpha, beta, source), source=source)
-        ideal_metrics = read_metrics(ideal_states, target, read_phase(source))
-        cases.insert(0, ("Ideal memory initialization", ideal_ts, ideal_states,
-                         ideal_metrics[1], ideal_metrics[2]))
-
-    fig = plt.figure(figsize=(14, 11), layout="constrained")
-    grid = fig.add_gridspec(3, 2, height_ratios=(1, 1, 1.15))
+    fig = plt.figure(figsize=(12, 10), layout="constrained")
+    grid = fig.add_gridspec(3, 2)
     flux_axis = fig.add_subplot(grid[0, 0])
-    voltage_axis = fig.add_subplot(grid[0, 1])
-    detuning_axis = fig.add_subplot(grid[1, 0])
-    summary = fig.add_subplot(grid[1, 1])
-    flux_axis.plot(ts, [flux_read(t) for t in ts])
-    flux_axis.set(ylabel="Flux / flux quantum",
-                  title="Shared flux control" if roundtrip else "Flux control")
-    voltage_axis.plot(ts, [voltage_read(t) for t in ts])
-    voltage_axis.set(ylabel="Electrode voltage (V)",
-                     title="Shared voltage control" if roundtrip else "Voltage control")
-    # Use the retrieval controls, whose swap order is reversed from writing.
-    fields = np.array([voltage_read(t) / GAP_CM + STRAY_FIELD for t in ts])
-    transmon_detuning = np.array([transmon_frequency(flux_read(t)) - FC for t in ts])
+    voltage_axis = flux_axis.twinx()
+    detuning_axis = fig.add_subplot(grid[0, 1])
+    bottom_grid = grid[2, :].subgridspec(1, 2)
+    wrong_axis = fig.add_subplot(bottom_grid[0, 0])
+    flux_line, = flux_axis.plot(ts, [flux_read(t) for t in ts],
+                               color="tab:blue", label="Flux (left axis)", zorder=3)
+    voltage_line, = voltage_axis.plot(ts, [voltage_read(t) for t in ts],
+                                     color="tab:orange", linestyle="--",
+                                     label="Voltage (right axis)", zorder=2)
+    flux_axis.set_ylabel("Flux / flux quantum", color="tab:blue")
+    voltage_axis.set_ylabel("Electrode voltage (V)", color="tab:orange")
+    flux_axis.tick_params(axis="y", colors="tab:blue")
+    voltage_axis.tick_params(axis="y", colors="tab:orange")
+    flux_axis.spines["left"].set_color("tab:blue")
+    voltage_axis.spines["right"].set_color("tab:orange")
+    flux_axis.set_title("Flux and voltage control")
+    voltage_axis.legend(handles=[flux_line, voltage_line], loc="upper center",
+                        bbox_to_anchor=(0.5, 0.88), ncol=2, fontsize=8,
+                        framealpha=1)
+    fields = np.asarray([voltage_read(t) / GAP_CM + STRAY_FIELD for t in ts])
+    transmon_detuning = np.asarray([transmon_frequency(flux_read(t)) - FC for t in ts])
     atom_detuning = F_A_ZERO - FC + (K_R1 - K_R0) * fields**2
-    detuning_axis.plot(ts, transmon_detuning, label="Transmon")
-    detuning_axis.plot(ts, atom_detuning, label="Atom")
-    detuning_axis.set(ylabel="Detuning from cavity (MHz)", title="Retrieval detuning")
-    detuning_axis.legend()
-    summary.set_title("Final retrieval overlaps")
-    results_table(summary,
-                  ["Memory initialization", "Calibrated\ntransmon overlap", "Joint target\noverlap"],
-                  [["Ideal memory" if label == "Ideal memory initialization" else
-                    "After writing\nand storage", f"{case_corrected[-1]:.6f}",
-                    f"{case_joint[-1]:.6f}"]
-                   for label, _, _, case_corrected, case_joint in cases],
-                  widths=(0.38, 0.33, 0.29))
-    summary.text(0.5, 0.06, "Joint target: desired transmon, cavity vacuum, atom h0",
-                 transform=summary.transAxes, ha="center", fontsize=9)
+    detuning_axis.plot(ts, transmon_detuning, color="tab:blue", label="Transmon")
+    detuning_axis.plot(ts, atom_detuning, color="tab:orange", linestyle="--", label="Atom")
+    detuning_axis.axhline(0, color="gray", linewidth=.7, alpha=.5)
+    detuning_axis.set(title="Detuning from cavity", ylabel="Detuning (MHz)")
+    detuning_axis.legend(fontsize=8)
+    plot_preparation_probabilities(wrong_axis)
+    labels, probabilities = basis_probabilities("read", roundtrip, source)
+    for index, (label, _, _, _, _) in enumerate(cases):
+        basis_axis = fig.add_subplot(bottom_grid[0, index + 1], projection="3d")
+        selection = slice(2 * index, 2 * index + 2)
+        title = "Retrieval: " + ("after write/store" if roundtrip else source)
+        plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title, mode="read")
+    summary_lines = [f"{label}: selected-input overlap = {case_corrected[-1]:.6f}; "
+                     f"joint overlap = {case_joint[-1]:.6f}"
+                     for label, _, _, case_corrected, case_joint in cases]
+    summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
+    summary_lines.append("Olive: target basis-state fidelity. Other: all remaining joint states.")
+    fig.supxlabel("\n".join(summary_lines), fontsize=9)
     population_axes = []
-    time_axes = [flux_axis, voltage_axis, detuning_axis]
+    time_axes = [flux_axis, detuning_axis]
     for column, (label, case_ts, case_states, _, _) in enumerate(cases):
-        populations = fig.add_subplot(grid[2, column] if len(cases) > 1 else grid[2, :])
+        populations = fig.add_subplot(grid[1, column] if len(cases) > 1 else grid[1, :])
         population_axes.append(populations)
         time_axes.append(populations)
         for op, name in ((Pe, "Transmon e"), (n, "Cavity photons"),
@@ -702,8 +833,10 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         for _, (start, end) in stages:
             ax.axvline(start, color="gray", alpha=0.15)
             ax.axvline(end, color="gray", alpha=0.15)
-    title = "Retrieval comparison: ideal memory vs. write-store-read" if roundtrip else f"Retrieval from {source}"
-    fig.suptitle(title + " (illustrative, unoptimized controls)")
+    title = "Atom to transmon"
+    subtitle = "After writing and storage" if roundtrip else f"Retrieval from {source} memory"
+    fig.suptitle(title + "\n" + subtitle)
+    fig.canvas.manager.set_window_title(title)
     stem = "hybrid_roundtrip" if roundtrip else f"hybrid_retrieval_{source}"
     output = Path(__file__).with_name(stem + ".png")
     if save:
@@ -712,11 +845,6 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
                    np.column_stack((ts, raw, corrected, joint, coherence)),
                    delimiter=",", comments="",
                    header="retrieval_time_us,raw_transmon_overlap,calibrated_transmon_overlap,joint_overlap,transmon_coherence")
-        if ideal_metrics is not None:
-            np.savetxt(output.with_name(stem + "_ideal.csv"),
-                       np.column_stack((ideal_ts, *ideal_metrics)),
-                       delimiter=",", comments="",
-                       header="retrieval_time_us,raw_transmon_overlap,calibrated_transmon_overlap,joint_overlap,transmon_coherence")
         print(f"Saved {output}")
 
 
@@ -1042,12 +1170,10 @@ def write_paper_figure(save=False, show=True):
 
 
 def all_figures(save=False):
-    """Build every output before a single blocking show call."""
-    jobs = [ # these are all the diffent experiment
-        ("Write and store", lambda: main(save=save)),
-        ("Retrieval comparison", lambda: retrieval_main(roundtrip=True, save=save)),
-        ("Six-panel scientific summary", lambda: paper_figure(save=save, show=False)),
-        ("Transmon-to-atom paper-style figure", lambda: write_paper_figure(save=save, show=False)),
+    """Build the two compact windows before a single blocking show call."""
+    jobs = [
+        ("Transmon to atom", lambda: main(save=save)),
+        ("Atom to transmon", lambda: retrieval_main(roundtrip=True, save=save)),
     ]
     for index, (name, build) in enumerate(jobs, start=1):
         print(f"Generating figure {index}/{len(jobs)}: {name}", flush=True)
@@ -1075,7 +1201,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-show", action="store_true",
                         help="Do not open plot windows (for unattended runs).")
     parser.add_argument("--all-figures", action="store_true",
-                        help="Generate every figure (also the default with no mode selected).")
+                        help="Generate the write/store and retrieval windows (default).")
     parser.add_argument("--write-paper-figure", action="store_true",
                         help="Paper-style preparation, dynamics, and write probabilities.")
     parser.add_argument("--run", action="store_true", help="Run figures directly, bypassing the startup panel.")
