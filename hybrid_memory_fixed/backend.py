@@ -363,6 +363,7 @@ def plot_basis_columns(ax, labels, probabilities, title, mode="write"):
     ax.yaxis.label.set_size(9)
     ax.zaxis.label.set_size(9)
     ax.set_title(title, fontsize=10, pad=8)
+    ax.set_box_aspect((4, 4, 3), zoom=1.12)
     ax.view_init(elev=25, azim=-53)
 
 
@@ -786,8 +787,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     flux_axis = fig.add_subplot(grid[0, 0])
     voltage_axis = flux_axis.twinx()
     detuning_axis = fig.add_subplot(grid[0, 1])
-    bottom_grid = grid[2, :].subgridspec(1, 2)
-    wrong_axis = fig.add_subplot(bottom_grid[0, 0])
+    wrong_axis = fig.add_subplot(grid[2, 0])
     flux_line, = flux_axis.plot(ts, [flux_read(t) for t in ts],
                                color="tab:blue", label="Flux (left axis)", zorder=3)
     voltage_line, = voltage_axis.plot(ts, [voltage_read(t) for t in ts],
@@ -814,11 +814,10 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     plot_preparation_probabilities(wrong_axis)
     labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
     for index, (label, _, _, _, _) in enumerate(cases):
-        basis_axis = fig.add_subplot(bottom_grid[0, index + 1], projection="3d")
+        basis_axis = fig.add_subplot(grid[2, index + 1], projection="3d")
         selection = slice(3 * index, 3 * index + 3)
         title = "Retrieval: " + ("after write/store" if roundtrip else source)
         plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title, mode="read")
-        basis_axis.set_box_aspect((4, 4, 3), zoom=1.12)
     summary_lines = [f"{label}: selected-input overlap = {case_corrected[-1]:.6f}; "
                      f"joint overlap = {case_joint[-1]:.6f}"
                      for label, _, _, case_corrected, case_joint in cases]
