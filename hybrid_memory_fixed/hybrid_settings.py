@@ -3,6 +3,11 @@ import json
 import math
 from pathlib import Path
 
+# SI constants (e and h are exact; a0 is the Bohr radius in metres).
+ELEMENTARY_CHARGE = 1.602176634e-19
+PLANCK = 6.62607015e-34
+BOHR_RADIUS = 5.29177210544e-11
+
 # Group, key, label, units, default, positive/nonnegative/free/integer.
 FIELDS = [
 ("Cavity and transmon","FC","Cavity frequency","MHz",5000.0,"positive"),
@@ -10,8 +15,12 @@ FIELDS = [
 ("Cavity and transmon","EJ_MAX","Maximum Josephson energy / h","MHz",20000.0,"positive"),
 ("Cavity and transmon","ASYMMETRY","SQUID junction asymmetry","dimensionless",0.10,"nonnegative"),
 ("Cavity and transmon","F_T_PARK","Parked transmon frequency","MHz",5800.0,"positive"),
-("Cavity and transmon","G_TC","Transmon-cavity coupling g / 2pi","MHz",20.0,"positive"),
-("Cavity and transmon","G_AC","Atom-cavity coupling g / 2pi","MHz",0.5,"positive"),
+("Coupling parameters","BETA","Capacitive participation beta","dimensionless",0.10,"positive"),
+("Coupling parameters","V_ZPF_UV","Cavity zero-point voltage at transmon","uV",0.5,"positive"),
+("Coupling parameters","N_01","Charge matrix element |<0|n|1>|","dimensionless",0.8,"positive"),
+("Coupling parameters","D_01_EA0","Atomic transition dipole magnitude |d_01|","e a0",1000.0,"positive"),
+("Coupling parameters","E_ZPF_V_PER_M","Cavity zero-point field at atom","V/m",0.04,"positive"),
+("Coupling parameters","DIPOLE_ALIGNMENT","Dipole-field alignment cos(theta)","dimensionless",1.0,"free"),
 ("Atom and electrodes","F_A_ZERO","Zero-field Rydberg transition","MHz",5150.0,"positive"),
 ("Atom and electrodes","K_R0","Lower Rydberg Stark coefficient","MHz/(V/cm)^2",-2.0,"free"),
 ("Atom and electrodes","K_R1","Upper Rydberg Stark coefficient","MHz/(V/cm)^2",-12.0,"free"),
@@ -41,7 +50,30 @@ FIELDS = [
 DEFAULTS = {key: default for _,key,_,_,default,_ in FIELDS}
 
 
+def coupling_strengths(config):
+    """Return g/(2*pi) in MHz from validated physical inputs.
+
+    g_TC = 2*e*beta*V_zpf*|n_01|/hbar and
+    g_AC = |d_01 dot E_zpf|/hbar. Dividing by 2*pi replaces
+    hbar with h; dividing Hz by 1e6 gives MHz.
+    V_zpf and E_zpf are local vacuum RMS amplitudes, not peak fields.
+    """
+    return {
+        "transmon_coupling_MHz": (2 * ELEMENTARY_CHARGE / PLANCK
+                                  * config["BETA"] * (config["V_ZPF_UV"] * 1e-6)
+                                  * config["N_01"] / 1e6),
+        "atom_coupling_MHz": (ELEMENTARY_CHARGE * BOHR_RADIUS / PLANCK
+                              * config["D_01_EA0"] * config["E_ZPF_V_PER_M"]
+                              * abs(config["DIPOLE_ALIGNMENT"]) / 1e6),
+    }
+
+
 def validate(values):
+    if not isinstance(values, dict):
+        raise ValueError("Settings must be a JSON object.")
+    if {"G_TC", "G_AC"} & set(values):
+        raise ValueError("G_TC and G_AC are now calculated. Replace coupling inputs with "
+                         "BETA, V_ZPF_UV, N_01, D_01_EA0, E_ZPF_V_PER_M, and DIPOLE_ALIGNMENT.")
     unknown = set(values) - set(DEFAULTS)
     if unknown:
         raise ValueError("Unknown settings: " + ", ".join(sorted(unknown)))
@@ -65,6 +97,13 @@ def validate(values):
         config[key] = value
     if not 0 <= config["ASYMMETRY"] < 1:
         raise ValueError("SQUID asymmetry must be between 0 (inclusive) and 1 (exclusive).")
+    if config["BETA"] > 1:
+        raise ValueError("Capacitive participation beta must be at most 1.")
+    if not -1 <= config["DIPOLE_ALIGNMENT"] <= 1:
+        raise ValueError("Dipole-field alignment cos(theta) must be between -1 and 1.")
+    for label, value in coupling_strengths(config).items():
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(label + " must be finite and greater than zero for swap timing.")
     if not 0 <= config["INPUT_THETA"] <= 180:
         raise ValueError("Input polar angle must be between 0 and 180 degrees.")
     if config["K_R1"] == config["K_R0"]:
@@ -82,14 +121,16 @@ def validate(values):
 
 def derived(config):
     c=validate(config)
+    couplings=coupling_strengths(c)
     field=math.sqrt((c["FC"]-c["F_A_ZERO"])/(c["K_R1"]-c["K_R0"]))
     return {
+        **couplings,
         "resonance_field_V_per_cm": field,
         "resonance_voltage_V": c["GAP_CM"]*(field-c["STRAY_FIELD"]),
         "park_voltage_V": c["GAP_CM"]*(c["E_PARK"]-c["STRAY_FIELD"]),
         "optical_pi_pulse_us": 1/c["OMEGA"],
-        "transmon_swap_hold_us": 1/(4*c["G_TC"]),
-        "atom_swap_hold_us": 1/(4*c["G_AC"]),
+        "transmon_swap_hold_us": 1/(4*couplings["transmon_coupling_MHz"]),
+        "atom_swap_hold_us": 1/(4*couplings["atom_coupling_MHz"]),
         "cavity_Q": 2*math.pi*c["FC"]*c["T1_C"],
     }
 

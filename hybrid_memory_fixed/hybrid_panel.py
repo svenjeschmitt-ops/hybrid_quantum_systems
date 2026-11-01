@@ -1,4 +1,6 @@
 """Native startup parameter panel. Keep beside backend.py and hybrid_settings.py."""
+import base64
+import io
 import json
 import os
 from pathlib import Path
@@ -39,6 +41,27 @@ MODES = [
 ]
 
 
+def coupling_equations_png(dpi=120):
+    """Typeset the coupling equations without a LaTeX installation or GUI backend."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    figure=Figure(figsize=(5.6,1.25),dpi=dpi)
+    FigureCanvasAgg(figure)
+    equations=(
+        r"$g_{\mathrm{TC}} = \frac{2e\beta V_{\mathrm{zpf}}}{\hbar}"
+        r"\left|\langle 0|\hat{n}|1\rangle\right|$",
+        r"$g_{\mathrm{AC}} = \frac{\left|\mathbf{d}_{01}\cdot"
+        r"\mathbf{E}_{\mathrm{zpf}}\right|}{\hbar}"
+        r"= \frac{|d_{01}|E_{\mathrm{zpf}}|\cos\theta|}{\hbar}$",
+    )
+    for y,equation in zip((0.75,0.20),equations):
+        figure.text(0.02,y,equation,fontsize=18,math_fontfamily="stix",color="#242424")
+    output=io.BytesIO()
+    figure.savefig(output,format="png",transparent=True,bbox_inches="tight",pad_inches=0.08)
+    return output.getvalue()
+
+
 class ParameterPanel:
     def __init__(self, root, backend_path=None):
         self.root=root
@@ -53,6 +76,7 @@ class ParameterPanel:
         root.geometry("1000x820")
         root.minsize(850,650)
         self.entries={}
+        self.coupling_summary=tk.StringVar()
         outer=ttk.Frame(root,padding=14)
         outer.pack(fill="both",expand=True)
         ttk.Label(outer,text="Hybrid quantum memory",font=("",18,"bold")).pack(anchor="w")
@@ -71,7 +95,20 @@ class ParameterPanel:
                 entry.grid(row=row,column=1,sticky="ew",pady=7)
                 ttk.Label(frame,text=units).grid(row=row,column=2,sticky="w",padx=10)
                 self.entries[key]=value
-        ttk.Label(outer,text="This model takes a cavity frequency and couplings as inputs; it does not solve cavity geometry.\n"
+                value.trace_add("write",self.update_couplings)
+            if group == "Coupling parameters":
+                self.coupling_equations=tk.PhotoImage(
+                    master=root,data=base64.b64encode(
+                        coupling_equations_png(dpi=root.winfo_fpixels("1i"))).decode("ascii"))
+                ttk.Label(frame,image=self.coupling_equations).grid(
+                    row=row+1,column=0,columnspan=3,sticky="w",pady=(12,6))
+                ttk.Label(frame,text="Use local vacuum RMS voltage and field amplitudes.\n"
+                                     "Supply the charge matrix element at the operating point. "
+                                     "Couplings stay constant during a run.",
+                          wraplength=800).grid(row=row+2,column=0,columnspan=3,sticky="w",pady=(0,8))
+        ttk.Label(outer,textvariable=self.coupling_summary).pack(anchor="w",pady=(8,0))
+        self.update_couplings()
+        ttk.Label(outer,text="Couplings are calculated from device and atomic inputs; cavity geometry is not solved.\n"
                             "Stark coefficients include their sign and the factor -alpha/(2h). Pure dephasing times are not total T2.",
                   wraplength=940).pack(anchor="w",pady=(10,6))
         controls=ttk.Frame(outer)
@@ -101,6 +138,18 @@ class ParameterPanel:
 
     def config(self):
         return validate({key:value.get() for key,value in self.entries.items()})
+
+    def update_couplings(self,*_):
+        # Traces can fire while entries are still being constructed.
+        if len(self.entries) != len(FIELDS):
+            return
+        try:
+            d=derived(self.config())
+            self.coupling_summary.set(
+                f"Calculated g(TC) / 2π: {d['transmon_coupling_MHz']:.6g} MHz; "
+                f"g(AC) / 2π: {d['atom_coupling_MHz']:.6g} MHz")
+        except ValueError:
+            self.coupling_summary.set("Calculated couplings unavailable: check parameter values.")
 
     def append(self,text):
         self.log.configure(state="normal")

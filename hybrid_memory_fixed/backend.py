@@ -31,8 +31,9 @@ if _config_args.config:
     except (OSError, ValueError) as exc:
         _config_parser.error(f"Cannot load config {_config_args.config!r}: {exc}")
 
-from hybrid_settings import validate
+from hybrid_settings import validate, coupling_strengths
 _SETTINGS = validate(_SETTINGS)
+_COUPLINGS = coupling_strengths(_SETTINGS)
 
 def parameter(name, default):
     return _SETTINGS.get(name, default)
@@ -45,8 +46,9 @@ EC = parameter("EC", 250.0) # transmon charging energy
 EJ_MAX = parameter("EJ_MAX", 20000.0) # maximum JJ energy
 ASYMMETRY = parameter("ASYMMETRY", 0.10) # asymmetry between JJ
 F_T_PARK = parameter("F_T_PARK", 5800.0) # transmon frequency before its changing with the cavity
-G_TC = TWOPI * parameter('G_TC', 20.0) # transmon to cavity coupling strength
-G_AC = TWOPI * parameter('G_AC', 0.5) #atom-cavity coupling strength
+# Derived g/(2*pi) in MHz -> angular coupling in rad/us for the Hamiltonian.
+G_TC = TWOPI * _COUPLINGS["transmon_coupling_MHz"]
+G_AC = TWOPI * _COUPLINGS["atom_coupling_MHz"]
 
 # Example low-field Stark coefficients, defined by shift/h = K*E^2.
 # K is MHz/(V/cm)^2, already INCLUDING the conventional -alpha/(2h).
@@ -1227,6 +1229,8 @@ if __name__ == "__main__":
         parser.error("Choose one figure mode, or use --all-figures.")
     if args.all_figures and args.check:
         parser.error("--check runs verification separately from --all-figures.")
+    print(f"Calculated g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
+          f"g_AC / 2pi: {G_AC/TWOPI:.6g} MHz", flush=True)
     if args.all_figures or (selected_modes == 0 and not args.check):
         all_figures(save=args.save)
     elif args.write_only:
