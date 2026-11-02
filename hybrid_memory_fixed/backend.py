@@ -11,6 +11,7 @@ Check: python backend.py --check
 import argparse
 import sys
 import json
+from functools import lru_cache
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -31,7 +32,7 @@ if _config_args.config:
     except (OSError, ValueError) as exc:
         _config_parser.error(f"Cannot load config {_config_args.config!r}: {exc}")
 
-from hybrid_settings import validate, coupling_strengths
+from hybrid_settings import validate, coupling_strengths, derived
 _SETTINGS = validate(_SETTINGS)
 _COUPLINGS = coupling_strengths(_SETTINGS)
 
@@ -59,7 +60,9 @@ K_R1 = parameter("K_R1", -12.0)
 GAP_CM = parameter("GAP_CM", 0.10)
 STRAY_FIELD = parameter("STRAY_FIELD", 0.20)
 E_PARK = parameter("E_PARK", 0.0)
-E_SWAP = np.sqrt((FC - F_A_ZERO) / (K_R1 - K_R0))
+# Independent applied voltage: device changes must not silently retune it.
+V_SWAP = _SETTINGS["V_SWAP"]
+E_SWAP = V_SWAP / GAP_CM + STRAY_FIELD
 
 # Coherence times (us), phenomenological Markovian rates.
 T1_T = parameter("T1_T", 100.0)
@@ -94,7 +97,7 @@ def flux_for_frequency(f):
     return np.arccos(np.sqrt(c2)) / np.pi
 
 PHI_PARK = flux_for_frequency(F_T_PARK)
-PHI_SWAP = flux_for_frequency(FC)
+PHI_SWAP = _SETTINGS["PHI_SWAP"]
 
 def transmon_frequency(phi):
     ej = EJ_MAX * np.sqrt(
@@ -432,7 +435,7 @@ def main(check=False, save=False):
     voltage_axis = control_axis.twinx()
     detuning_axis = fig.add_subplot(grid[0, 1])
     population_axis = fig.add_subplot(grid[1, :])
-    wrong_axis = fig.add_subplot(grid[2, 0])
+    performance_axis = fig.add_subplot(grid[2, 0])
     basis_axis = fig.add_subplot(grid[2, 1], projection="3d")
     x = np.linspace(0, MAP[1], 2501)
     flux_line, = control_axis.plot(x, [flux(t) for t in x],
@@ -466,7 +469,7 @@ def main(check=False, save=False):
     population_axis.set(ylabel="Population / photon number", title="Write transfer dynamics")
     population_axis.legend(fontsize=8, ncol=2)
     storage_duration = ts[-1] - ts[mapping_index]
-    plot_preparation_probabilities(wrong_axis)
+    plot_storage_fidelity(performance_axis, save=save)
     labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase)
     plot_basis_columns(basis_axis, labels, probabilities, "Write inputs (end of mapping)")
     fig.supxlabel(f"Selected input after {storage_duration:g} µs storage: "
@@ -724,6 +727,110 @@ def read_metrics(states, target, phase):
     return tuple(np.asarray(v) for v in (raw, corrected, joint, coherence))
 
 
+def retrieval_effect(target, phase, noisy=True):
+    """Pull a corrected joint target back through the fixed read channel.
+
+    Tr[E_read(rho) P] = Tr[rho E_read^dagger(P)]. This avoids repeating
+    readout for every storage duration. Effects must not be trace-normalized.
+    """
+    h_read, times, _, _, _ = retrieval_model("hyperfine")
+    rotation = IT + (np.exp(1j * phase) - 1) * e * e.dag()
+    u = qt.tensor(rotation, IC, IA)
+    projector = qt.ket2dm(qt.tensor(target, qt.basis(NC, 0), h0))
+    effect = u.dag() * projector * u
+    adjoint = qt.liouvillian(h_read, C_OPS if noisy else []).dag()
+    duration = times[-1]
+
+    def reverse_generator(t):
+        return adjoint(duration - t)
+
+    result = qt.mesolve(qt.QobjEvo(reverse_generator), effect,
+                        [0.0, duration], options={
+                            "method": "dop853", "max_step": MAX_STEP,
+                            "atol": 1e-11, "rtol": 1e-9,
+                            "nsteps": 100000, "normalize_output": False,
+                        })
+    return result.states[-1]
+
+
+def direct_transmon_fidelity(elapsed):
+    """Six-state mean for isolated transmon T1/pure-dephasing storage.
+
+    Deterministic parked-frequency precession is removed by its rotating frame.
+    """
+    elapsed = np.asarray(elapsed)
+    t2_inverse = 1 / (2 * T1_T) + 1 / TPHI_T
+    return (3 + 2 * np.exp(-elapsed * t2_inverse)
+            + np.exp(-elapsed / T1_T)) / 6
+
+
+@lru_cache(maxsize=1)
+def storage_fidelity_data():
+    """Unconditional six-state joint fidelity versus hyperfine hold time.
+
+    Both ideal/noisy channels use the same noiseless |+> calibration at the
+    configured STORAGE, held fixed for every input and duration. Storage
+    evolves the full joint state under the actual constant parked Hamiltonian.
+    """
+    durations = np.unique(np.r_[np.linspace(0, max(2 * STORAGE, 1.0), 41), STORAGE])
+    inputs = (g, e, (g + e).unit(), (g - e).unit(),
+              (g + 1j * e).unit(), (g - 1j * e).unit())
+    phase = read_phase("hyperfine", roundtrip=True)
+    curves = []
+    for noisy in (True, False):
+        print(f"Storage fidelity: {'noisy' if noisy else 'ideal'} six-state sweep…",
+              flush=True)
+        # All drives vanish after MAP; the remaining Hamiltonian is constant.
+        # Diagonalizing once avoids resolving fast parked detunings at each hold.
+        parked = H(MAP[1])
+        solver = qt.MESolver(parked, C_OPS if noisy else [], options={
+            "method": "diag", "normalize_output": False,
+        })
+        values = []
+        for index, target in enumerate(inputs, start=1):
+            print(f"  input {index}/6", flush=True)
+            _, written = simulate(target[0, 0], target[1, 0], noisy=noisy,
+                                  include_storage=False)
+            initial = qt.ket2dm(written[-1]) if written[-1].isket else written[-1]
+            effect = retrieval_effect(target, phase, noisy=noisy)
+            held = solver.run(initial, durations)
+            values.append(np.real(qt.expect(effect, held.states)))
+        curves.append(np.mean(values, axis=0))
+
+    # Isolated parked transmon, same T1/Tphi and total write+hold+read time.
+    # Work in its known rotating frame, removing deterministic precession only.
+    read_duration = retrieval_model("hyperfine")[1][-1]
+    elapsed = MAP[1] + durations + read_duration
+    direct = direct_transmon_fidelity(elapsed)
+    data = np.column_stack((durations, curves[0], curves[1], direct))
+    if (not np.all(np.isfinite(data)) or np.any(data[:, 1:] < -1e-6)
+            or np.any(data[:, 1:] > 1 + 1e-6)):
+        raise ValueError("Storage fidelity sweep produced invalid probabilities.")
+    data.setflags(write=False)
+    return data
+
+
+def plot_storage_fidelity(ax, save=False):
+    data = storage_fidelity_data()
+    for column, label, style in ((1, "Write–store–read (noise)", "-"),
+                                 (2, "Write–store–read (ideal)", "--"),
+                                 (3, "Direct transmon (noise)", ":")):
+        ax.plot(data[:, 0], data[:, column], style, label=label)
+    ax.axvline(STORAGE, color="gray", alpha=.4, linewidth=1)
+    ax.set(xlabel="Atomic storage duration (µs)", ylabel="Six-state mean joint fidelity",
+           title="Memory performance vs storage duration", ylim=(0, 1.02),
+           xlim=(data[0, 0], data[-1, 0]))
+    ax.legend(fontsize=8, loc="lower left")
+    ax.text(.98, .04, "Fixed phase calibration; no postselection\n"
+            "Direct transmon: equal total elapsed time", transform=ax.transAxes,
+            ha="right", va="bottom", fontsize=7)
+    if save:
+        output = Path(__file__).with_name("hybrid_storage_fidelity.csv")
+        np.savetxt(output, data, delimiter=",", comments="",
+                   header="storage_duration_us,noisy_mean_joint_fidelity,ideal_mean_joint_fidelity,direct_transmon_mean_fidelity")
+        print(f"Saved {output}", flush=True)
+
+
 def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False):
     if roundtrip and source != "hyperfine":
         raise ValueError("Round trip retrieves from hyperfine memory.")
@@ -787,7 +894,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     flux_axis = fig.add_subplot(grid[0, 0])
     voltage_axis = flux_axis.twinx()
     detuning_axis = fig.add_subplot(grid[0, 1])
-    wrong_axis = fig.add_subplot(grid[2, 0])
+    performance_axis = fig.add_subplot(grid[2, 0])
     flux_line, = flux_axis.plot(ts, [flux_read(t) for t in ts],
                                color="tab:blue", label="Flux (left axis)", zorder=3)
     voltage_line, = voltage_axis.plot(ts, [voltage_read(t) for t in ts],
@@ -811,7 +918,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     detuning_axis.axhline(0, color="gray", linewidth=.7, alpha=.5)
     detuning_axis.set(title="Detuning from cavity", ylabel="Detuning (MHz)")
     detuning_axis.legend(fontsize=8)
-    plot_preparation_probabilities(wrong_axis)
+    plot_storage_fidelity(performance_axis, save=save)
     labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
     for index, (label, _, _, _, _) in enumerate(cases):
         basis_axis = fig.add_subplot(grid[2, index + 1], projection="3d")
@@ -964,7 +1071,7 @@ def paper_figure(save=False, show=True):
 
         ax=axes[2]
         ax.plot(ts,populations[0],color=blue,ls="--",
-                label="Bare atom-cavity resonance")
+                label="Configured swap bias")
         ax.plot(ts,populations[1],color=dark,label="Atom parked / detuned")
         ax.axvline(np.pi/(2*G_AC),color="gray",lw=.8,ls=":")
         ax.set(xlabel="Interaction time (us)",ylabel=r"$P(r_1)$",
@@ -1228,6 +1335,10 @@ if __name__ == "__main__":
         parser.error("Choose one figure mode, or use --all-figures.")
     if args.all_figures and args.check:
         parser.error("--check runs verification separately from --all-figures.")
+    diagnostics = derived(_SETTINGS)
+    print(f"Swap plateau detuning (MHz): "
+          f"transmon-cavity={diagnostics['transmon_swap_detuning_MHz']:.6g}; "
+          f"atom-cavity={diagnostics['atom_swap_detuning_MHz']:.6g}", flush=True)
     print(f"Calculated g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
           f"g_AC / 2pi: {G_AC/TWOPI:.6g} MHz", flush=True)
     if args.all_figures or (selected_modes == 0 and not args.check):

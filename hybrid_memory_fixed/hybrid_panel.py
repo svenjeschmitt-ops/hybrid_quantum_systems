@@ -109,6 +109,7 @@ class ParameterPanel:
         ttk.Label(outer,textvariable=self.coupling_summary).pack(anchor="w",pady=(8,0))
         self.update_couplings()
         ttk.Label(outer,text="Couplings are calculated from device and atomic inputs; cavity geometry is not solved.\n"
+                            "Swap flux and voltage are independent inputs; device changes do not retune them.\n"
                             "Stark coefficients include their sign and the factor -alpha/(2h). Pure dephasing times are not total T2.",
                   wraplength=940).pack(anchor="w",pady=(10,6))
         controls=ttk.Frame(outer)
@@ -147,7 +148,9 @@ class ParameterPanel:
             d=derived(self.config())
             self.coupling_summary.set(
                 f"Calculated g(TC) / 2π: {d['transmon_coupling_MHz']:.6g} MHz; "
-                f"g(AC) / 2π: {d['atom_coupling_MHz']:.6g} MHz")
+                f"g(AC) / 2π: {d['atom_coupling_MHz']:.6g} MHz\n"
+                f"Swap detuning TC: {d['transmon_swap_detuning_MHz']:.6g} MHz; "
+                f"AC: {d['atom_swap_detuning_MHz']:.6g} MHz")
         except ValueError:
             self.coupling_summary.set("Calculated couplings unavailable: check parameter values.")
 
@@ -189,7 +192,8 @@ class ParameterPanel:
         try:
             d=derived(self.config())
             self.status.set(
-                f"Model checks passed. Resonance voltage: {d['resonance_voltage_V']:.5g} V; "
+                f"Model checks passed. Swap detuning TC/AC: "
+                f"{d['transmon_swap_detuning_MHz']:.5g}/{d['atom_swap_detuning_MHz']:.5g} MHz; "
                 f"optical pulse: {d['optical_pi_pulse_us']:.5g} us; "
                 f"nominal atom swap hold: {d['atom_swap_hold_us']:.5g} us; "
                 f"cavity Q: {d['cavity_Q']:.4g}.")

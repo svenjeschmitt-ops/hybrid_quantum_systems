@@ -15,6 +15,7 @@ FIELDS = [
 ("Cavity and transmon","EJ_MAX","Maximum Josephson energy / h","MHz",20000.0,"positive"),
 ("Cavity and transmon","ASYMMETRY","SQUID junction asymmetry","dimensionless",0.10,"nonnegative"),
 ("Cavity and transmon","F_T_PARK","Parked transmon frequency","MHz",5800.0,"positive"),
+("Cavity and transmon","PHI_SWAP","Swap flux / flux quantum","dimensionless",0.2597137967167845,"nonnegative"),
 ("Coupling parameters","BETA","Capacitive participation beta","dimensionless",0.10,"positive"),
 ("Coupling parameters","V_ZPF_UV","Cavity zero-point voltage at transmon","uV",0.5,"positive"),
 ("Coupling parameters","N_01","Charge matrix element |<0|n|1>|","dimensionless",0.8,"positive"),
@@ -28,6 +29,7 @@ FIELDS = [
 ("Atom and electrodes","GAP_CM","Electrode separation","cm",0.10,"positive"),
 ("Atom and electrodes","STRAY_FIELD","Static stray electric field","V/cm",0.20,"free"),
 ("Atom and electrodes","E_PARK","Parked total electric field","V/cm",0.0,"free"),
+("Atom and electrodes","V_SWAP","Swap electrode voltage","V",0.3672983346207417,"free"),
 ("Atom and electrodes","F_WRONG_SPLIT","Unwanted-level frequency separation","MHz",1320.0,"free"),
 ("Atom and electrodes","REL_WRONG_DIPOLE","Relative unwanted optical amplitude","dimensionless",1.0,"nonnegative"),
 ("Loss and coherence","T1_T","Transmon relaxation time","us",100.0,"positive"),
@@ -106,27 +108,33 @@ def validate(values):
             raise ValueError(label + " must be finite and greater than zero for swap timing.")
     if not 0 <= config["INPUT_THETA"] <= 180:
         raise ValueError("Input polar angle must be between 0 and 180 degrees.")
-    if config["K_R1"] == config["K_R0"]:
-        raise ValueError("Different Rydberg Stark coefficients are needed for voltage tuning.")
-    field_squared = ((config["FC"]-config["F_A_ZERO"]) /
-                     (config["K_R1"]-config["K_R0"]))
-    if field_squared < 0:
-        raise ValueError("These Stark coefficients cannot tune the atomic transition to this cavity.")
-    for key in ("FC","F_T_PARK"):
-        ratio = (config[key]+config["EC"])**2 / (8*config["EC"]*config["EJ_MAX"])
-        if not config["ASYMMETRY"] <= ratio <= 1:
-            raise ValueError("The cavity or parked transmon frequency is outside the SQUID tuning range.")
+    if config["PHI_SWAP"] > 0.5:
+        raise ValueError("Swap flux / flux quantum must be between 0 and 0.5.")
+    ratio = (config["F_T_PARK"]+config["EC"])**2 / (8*config["EC"]*config["EJ_MAX"])
+    if not config["ASYMMETRY"] <= ratio <= 1:
+        raise ValueError("The parked transmon frequency is outside the SQUID tuning range.")
     return config
 
 
 def derived(config):
     c=validate(config)
     couplings=coupling_strengths(c)
-    field=math.sqrt((c["FC"]-c["F_A_ZERO"])/(c["K_R1"]-c["K_R0"]))
+    # Resonance is a diagnostic only; unreachable crossings remain valid runs.
+    differential_stark = c["K_R1"] - c["K_R0"]
+    field_squared = ((c["FC"]-c["F_A_ZERO"])/differential_stark
+                     if differential_stark else None)
+    field = math.sqrt(field_squared) if field_squared is not None and field_squared >= 0 else None
+    swap_field = c["V_SWAP"]/c["GAP_CM"] + c["STRAY_FIELD"]
+    ej = c["EJ_MAX"] * math.sqrt(math.cos(math.pi*c["PHI_SWAP"])**2
+                               + c["ASYMMETRY"]**2 * math.sin(math.pi*c["PHI_SWAP"])**2)
+    transmon_frequency = math.sqrt(8*c["EC"]*ej) - c["EC"]
     return {
         **couplings,
         "resonance_field_V_per_cm": field,
-        "resonance_voltage_V": c["GAP_CM"]*(field-c["STRAY_FIELD"]),
+        "resonance_voltage_V": (c["GAP_CM"]*(field-c["STRAY_FIELD"])
+                                if field is not None else None),
+        "transmon_swap_detuning_MHz": transmon_frequency-c["FC"],
+        "atom_swap_detuning_MHz": c["F_A_ZERO"]+differential_stark*swap_field**2-c["FC"],
         "park_voltage_V": c["GAP_CM"]*(c["E_PARK"]-c["STRAY_FIELD"]),
         "optical_pi_pulse_us": 1/c["OMEGA"],
         "transmon_swap_hold_us": 1/(4*couplings["transmon_coupling_MHz"]),
