@@ -320,7 +320,7 @@ def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None):
                 label = (("h0 → g", "h1 → e", "+ → +") if source == "hyperfine" else
                          ("r0 → g", "r1 → e", "+ → +"))[index]
                 if roundtrip:
-                    label += "\n" + ("After write/store" if stored else "Ideal memory")
+                    label = ("g → g", "e → e", "+ → +")[index] + "\nAfter write/store"
             final = states[-1]
             probs = [float(np.real(qt.expect(qt.ket2dm(k), final))) for k in outputs]
             wrong = float(np.real(qt.expect(Pwrong, final)))
@@ -339,7 +339,7 @@ def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None):
     return labels, np.asarray(rows), np.asarray(fidelities)
 
 
-def plot_basis_columns(ax, labels, probabilities, title, mode="write"):
+def plot_basis_columns(ax, labels, probabilities, title, mode="write", input_label=None):
     """Original 3D input/output columns, with fixed joint-output rows."""
     for i, row in enumerate(probabilities):
         outputs = [row[0], row[1], row[2] + row[3]]
@@ -350,7 +350,7 @@ def plot_basis_columns(ax, labels, probabilities, title, mode="write"):
     input_labels = [label.split(" →")[0] for label in labels]
     ax.set_xticks(np.arange(len(labels)), input_labels)
     ax.set_yticks([0, 1, 2], ["g,0,h0", "g,0,h1" if mode == "write" else "e,0,h0", "Other"])
-    ax.set(xlabel="Transmon input" if mode == "write" else "Memory input",
+    ax.set(xlabel=input_label or ("Transmon input" if mode == "write" else "Memory input"),
            ylabel="Joint output", zlabel="Probability", zlim=(0, 1), title=title)
     ax.tick_params(labelsize=7, pad=1)
     ax.xaxis.labelpad = 5
@@ -385,9 +385,10 @@ def main(check=False, save=False):
     alpha = np.cos(theta / 2)
     beta = np.exp(1j * phi) * np.sin(theta / 2)
     target = (alpha * h0 + beta * h1).unit()
-    ts, states = simulate(alpha, beta, noisy=True, include_storage=not check)
+    ts, states = simulate(alpha, beta, noisy=True, include_storage=False)
     atomic_states = [rho.ptrace(2) for rho in states]
-    fidelity = np.array([overlap(rho, target, U) for rho in atomic_states])
+    transfer_target = (alpha * g + beta * e).unit()
+    fidelity = np.real(qt.expect(atomic_storage_effect(transfer_target, phase), states))
     coherence = np.array([2 * abs(rho[0, 1]) for rho in atomic_states])
     pops = np.array([
         np.real(qt.expect(op, states))
@@ -402,8 +403,8 @@ def main(check=False, save=False):
     print(f"Wrong-state population after preparation: {pops[7, prep_index]:.6e}")
     print(f"Peak wrong-state population (sampled): {pops[7].max():.6e}")
     print(f"Final wrong-state population: {pops[7, -1]:.6e}")
-    print(f"Mapping overlap: {fidelity[mapping_index]:.6f}")
-    print(f"Final overlap: {fidelity[-1]:.6f}")
+    print(f"Mapping joint transfer fidelity: {fidelity[mapping_index]:.6f}")
+    print(f"Final joint transfer fidelity: {fidelity[-1]:.6f}")
     print(f"Final 2|rho_h0,h1|: {coherence[-1]:.6f}")
     print(f"Calibrated memory phase (rad): {phase:.6f}")
 
@@ -461,16 +462,16 @@ def main(check=False, save=False):
         population_axis.plot(ts[transfer], line[transfer], label=label)
     population_axis.set(ylabel="Population / photon number", title="Write transfer dynamics")
     population_axis.legend(fontsize=8, ncol=2)
-    storage_duration = ts[-1] - ts[mapping_index]
-    plot_storage_fidelity(performance_axis, save=save)
+    plot_transfer_fidelity(performance_axis, "write", save=save)
     labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase)
     plot_basis_columns(basis_axis, labels, probabilities, "Write inputs (end of mapping)")
-    fig.supxlabel(f"Selected input after {storage_duration:g} µs storage: "
-                  f"phase-corrected overlap = {fidelity[-1]:.6f}; "
+    fig.supxlabel(f"Selected input at end of transfer: "
+                  f"joint fidelity = {fidelity[-1]:.6f}; "
                   f"coherence = {coherence[-1]:.6f}.\n"
                   f"Phase-corrected joint fidelities: g={input_fidelities[0]:.4f}, "
                   f"e={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.\n"
-                  "+ = equal coherent superposition; olive: intended logical outputs; Other: remaining joint states.",
+                  "+ = equal coherent superposition; fixed phase correction; no postselection.\n"
+                  "Target: transmon g, cavity vacuum, atomic input encoded in h0/h1.",
                   fontsize=9)
     for ax in (control_axis, detuning_axis, population_axis):
         ax.set_xlabel("Time (us)")
@@ -757,19 +758,81 @@ def direct_transmon_fidelity(elapsed):
             + np.exp(-elapsed / T1_T)) / 6
 
 
+def atomic_storage_effect(target, phase):
+    """Joint write/store target: transmon g, vacuum, input encoded in h0/h1.
+
+    Pull back the fixed memory phase correction, without conditioning on
+    successful transfer. Residual transmon/cavity excitation counts as error.
+    """
+    atom = (target[0, 0] * h0 + target[1, 0] * h1).unit()
+    joint = qt.tensor(g, qt.basis(NC, 0), atom)
+    rotation = qt.tensor(IT, IC, memory_rotation(phase))
+    return rotation.dag() * joint.proj() * rotation
+
+
+@lru_cache(maxsize=4)
+def transfer_fidelity_data(mode, source="hyperfine"):
+    """Time, then unconditional joint fidelities for logical 0, 1 and +.
+
+    Each direction starts with an independently prepared source qubit and
+    an empty destination. One noiseless phase calibration serves all inputs.
+    The + projector includes coherence, unlike a population-only score.
+    """
+    if mode not in ("write", "read"):
+        raise ValueError("mode must be write or read")
+    phase = calibrated_phase() if mode == "write" else read_phase(source)
+    curves = []
+    for target in (g, e, (g + e).unit()):
+        alpha, beta = target[0, 0], target[1, 0]
+        if mode == "write":
+            times, states = simulate(alpha, beta, include_storage=False)
+            values = np.real(qt.expect(atomic_storage_effect(target, phase), states))
+        else:
+            initial = retrieval_initial(alpha, beta, source)
+            times, states, _, _, _ = evolve_read(initial, source=source)
+            values = read_metrics(states, target, phase)[2]
+        curves.append(values)
+    data = np.column_stack((times, *curves))
+    data.setflags(write=False)
+    return data
+
+
+def plot_transfer_fidelity(ax, mode, source="hyperfine", save=False):
+    data = transfer_fidelity_data(mode, source)
+    labels = (("g → h0", "e → h1", "+ → (h0+h1)/√2") if mode == "write" else
+              (("h0 → g", "h1 → e", "+ → (g+e)/√2") if source == "hyperfine" else
+               ("r0 → g", "r1 → e", "+ → (g+e)/√2")))
+    for column, (label, style) in enumerate(zip(labels, ("-", "--", "-.")), start=1):
+        ax.plot(data[:, 0], data[:, column], style,
+                label=f"{label}: final {data[-1, column]:.4f}")
+    ax.set(xlabel="Transfer time (µs)", ylabel="Joint state-transfer fidelity",
+           title="Transmon → atom" if mode == "write" else "Atom → transmon",
+           ylim=(-.02, 1.02), xlim=(data[0, 0], data[-1, 0]))
+    ax.legend(fontsize=8, loc="best")
+    if save:
+        output = Path(__file__).with_name(f"hybrid_transfer_{mode}_fidelity.csv")
+        np.savetxt(output, data, delimiter=",", comments="",
+                   header="transfer_time_us,ground_joint_fidelity,excited_joint_fidelity,plus_joint_fidelity")
+        print(f"Saved {output}", flush=True)
+
+
 @lru_cache(maxsize=1)
 def storage_fidelity_data():
-    """Unconditional six-state joint fidelity versus hyperfine hold time.
+    """Atomic storage and round-trip return, both unconditional joint overlaps.
 
-    Both ideal/noisy channels use the same noiseless |+> calibration at the
-    configured STORAGE, held fixed for every input and duration. Storage
-    evolves the full joint state under the actual constant parked Hamiltonian.
+    Columns: hold time, round-trip noisy/ideal, direct transmon, atomic
+    noisy/ideal, excited-input atomic noisy/ideal. Atomic fidelity is measured
+    BEFORE readout, against |g,0> tensor (alpha|h0> + beta|h1>). It includes
+    write errors. Round-trip return alone also accepts a transmon bypass.
+    Separate noiseless write/read phase calibrations are fixed across inputs,
+    noise settings and durations. The full parked state is evolved throughout.
     """
     durations = np.unique(np.r_[np.linspace(0, max(2 * STORAGE, 1.0), 41), STORAGE])
     inputs = (g, e, (g + e).unit(), (g - e).unit(),
               (g + 1j * e).unit(), (g - 1j * e).unit())
     phase = read_phase("hyperfine", roundtrip=True)
-    curves = []
+    write_phase = calibrated_phase()
+    curves, atomic_curves, excited_curves = [], [], []
     for noisy in (True, False):
         print(f"Storage fidelity: {'noisy' if noisy else 'ideal'} six-state sweep…",
               flush=True)
@@ -779,7 +842,7 @@ def storage_fidelity_data():
         solver = qt.MESolver(parked, C_OPS if noisy else [], options={
             "method": "diag", "normalize_output": False,
         })
-        values = []
+        values, atomic_values = [], []
         for index, target in enumerate(inputs, start=1):
             print(f"  input {index}/6", flush=True)
             _, written = simulate(target[0, 0], target[1, 0], noisy=noisy,
@@ -788,14 +851,20 @@ def storage_fidelity_data():
             effect = retrieval_effect(target, phase, noisy=noisy)
             held = solver.run(initial, durations)
             values.append(np.real(qt.expect(effect, held.states)))
+            atomic_values.append(np.real(qt.expect(
+                atomic_storage_effect(target, write_phase), held.states)))
         curves.append(np.mean(values, axis=0))
+        atomic_curves.append(np.mean(atomic_values, axis=0))
+        excited_curves.append(atomic_values[1])
 
     # Isolated parked transmon, same T1/Tphi and total write+hold+read time.
     # Work in its known rotating frame, removing deterministic precession only.
     read_duration = retrieval_model("hyperfine")[1][-1]
     elapsed = MAP[1] + durations + read_duration
     direct = direct_transmon_fidelity(elapsed)
-    data = np.column_stack((durations, curves[0], curves[1], direct))
+    data = np.column_stack((durations, curves[0], curves[1], direct,
+                            atomic_curves[0], atomic_curves[1],
+                            excited_curves[0], excited_curves[1]))
     if (not np.all(np.isfinite(data)) or np.any(data[:, 1:] < -1e-6)
             or np.any(data[:, 1:] > 1 + 1e-6)):
         raise ValueError("Storage fidelity sweep produced invalid probabilities.")
@@ -805,23 +874,27 @@ def storage_fidelity_data():
 
 def plot_storage_fidelity(ax, save=False):
     data = storage_fidelity_data()
-    for column, label, style in ((1, "Write–store–read (noise)", "-"),
-                                 (2, "Write–store–read (ideal)", "--"),
-                                 (3, "Direct transmon (noise)", ":")):
-        ax.plot(data[:, 0], data[:, column], style, label=label)
+    for column, label, style, color in (
+            (4, "Atomic six-state mean (noise)", "-", "tab:blue"),
+            (5, "Atomic six-state mean (ideal)", "--", "tab:orange"),
+            (6, "Atomic excited-input transfer (noise)", "-", "tab:red"),
+            (1, "Transmon return (noise)", "-.", "gray"),
+            (3, "Direct transmon (noise)", ":", "tab:green")):
+        ax.plot(data[:, 0], data[:, column], style, label=label, color=color)
     ax.axvline(STORAGE, color="gray", alpha=.4, linewidth=1)
-    ax.set(xlabel="Atomic storage duration (µs)", ylabel="Six-state mean joint fidelity",
-           title="End-to-end fidelity vs storage duration", ylim=(0, 1.02),
+    ax.set(xlabel="Hold time after writing (µs)", ylabel="Joint fidelity",
+           title="Memory transfer and storage", ylim=(-.02, 1.02),
            xlim=(data[0, 0], data[-1, 0]))
-    ax.legend(fontsize=8, loc="lower left")
-    ax.text(.98, .04, "Fixed phase calibration; no postselection\n"
-            "Direct transmon: equal total elapsed time\n"
-            "Check write populations to confirm atomic storage.", transform=ax.transAxes,
-            ha="right", va="bottom", fontsize=7)
+    ax.legend(fontsize=8, loc="upper left")
+    ax.text(.98, .52, f"Write e → g,0,h1 (noise): {data[0, 6]:.3%}\n"
+            "Unchanged-transmon bypass: atomic mean = 1/3.\n"
+            "Transmon return can be high without transfer.\n"
+            "Fixed phases; no postselection.", transform=ax.transAxes,
+            ha="right", va="center", fontsize=7)
     if save:
         output = Path(__file__).with_name("hybrid_storage_fidelity.csv")
         np.savetxt(output, data, delimiter=",", comments="",
-                   header="storage_duration_us,noisy_mean_joint_fidelity,ideal_mean_joint_fidelity,direct_transmon_mean_fidelity")
+                   header="storage_duration_us,noisy_mean_joint_fidelity,ideal_mean_joint_fidelity,direct_transmon_mean_fidelity,atomic_noisy_mean_joint_fidelity,atomic_ideal_mean_joint_fidelity,atomic_noisy_excited_input_fidelity,atomic_ideal_excited_input_fidelity")
         print(f"Saved {output}", flush=True)
 
 
@@ -835,11 +908,14 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     beta = np.exp(1j * phi) * np.sin(theta / 2)
     target = (alpha * g + beta * e).unit()
     write_ts = write_states = None
+    atomic_joint = None
     if roundtrip:
         # Continue the COMPLETE joint state. Do not reset, postselect,
         # or remove residual cavity photons/entanglement after storage.
         write_ts, write_states = simulate(alpha, beta, noisy=True, include_storage=True)
         initial = write_states[-1]
+        atomic_joint = float(np.real(qt.expect(
+            atomic_storage_effect(target, calibrated_phase()), initial)))
     else:
         initial = retrieval_initial(alpha, beta, source)
     ts, states, stages, flux_read, voltage_read = evolve_read(initial, source=source)
@@ -854,6 +930,9 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     assert -1e-6 <= corrected[-1] <= 1 + 1e-6
 
     print("Mode:", "write-store-read round trip" if roundtrip else f"{source} to transmon")
+    if roundtrip:
+        print(f"Atomic storage joint fidelity BEFORE retrieval: {atomic_joint:.6f}")
+        print("Transmon return overlaps below include excitation that never entered the memory.")
     print(f"Raw final transmon overlap: {raw[-1]:.6f}")
     print(f"Calibrated final transmon overlap: {corrected[-1]:.6f}")
     print(f"Joint overlap (target transmon, cavity vacuum, atom h0): {joint[-1]:.6f}")
@@ -882,7 +961,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
 
     # The round trip uses only the complete state after writing and storage.
     cases = [("After writing and storage" if roundtrip else
-              "Ideal memory initialization", ts, states, corrected, joint)]
+              "Independently prepared atomic input", ts, states, corrected, joint)]
     fig = plt.figure(figsize=(12, 10), layout="constrained")
     grid = fig.add_gridspec(3, 2)
     flux_axis = fig.add_subplot(grid[0, 0])
@@ -912,19 +991,30 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     detuning_axis.axhline(0, color="gray", linewidth=.7, alpha=.5)
     detuning_axis.set(title="Detuning from cavity", ylabel="Detuning (MHz)")
     detuning_axis.legend(fontsize=8)
-    plot_storage_fidelity(performance_axis, save=save)
+    if roundtrip:
+        plot_storage_fidelity(performance_axis, save=save)
+    else:
+        plot_transfer_fidelity(performance_axis, "read", source, save=save)
     labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
     for index, (label, _, _, _, _) in enumerate(cases):
         basis_axis = fig.add_subplot(grid[2, index + 1], projection="3d")
         selection = slice(3 * index, 3 * index + 3)
-        title = "Retrieval: " + ("after write/store" if roundtrip else source)
-        plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title, mode="read")
+        title = "Transmon return after write/store" if roundtrip else "Retrieval: " + source
+        plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title,
+                           mode="read", input_label="Original transmon input" if roundtrip else None)
     summary_lines = [f"{label}: selected-input overlap = {case_corrected[-1]:.6f}; "
                      f"joint overlap = {case_joint[-1]:.6f}"
                      for label, _, _, case_corrected, case_joint in cases]
+    if roundtrip:
+        summary_lines.insert(0, f"Atomic storage BEFORE retrieval: selected-input joint fidelity = {atomic_joint:.6f}.")
+    else:
+        summary_lines = [f"Independently prepared atomic input: selected-input joint transfer fidelity = {joint[-1]:.6f}."]
     summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
-    summary_lines.append(f"Phase-corrected joint fidelities: input 0={input_fidelities[0]:.4f}, "
+    metric_label = "Round-trip return fidelities" if roundtrip else "Retrieval joint fidelities"
+    summary_lines.append(f"{metric_label}: input 0={input_fidelities[0]:.4f}, "
                          f"input 1={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.")
+    if roundtrip:
+        summary_lines.append("Return fidelity includes states that remained in the transmon; see atomic storage curves for transfer.")
     summary_lines.append("+ = equal coherent superposition; olive: intended logical outputs; Other: remaining joint states.")
     fig.supxlabel("\n".join(summary_lines), fontsize=9)
     population_axes = []
@@ -948,7 +1038,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         for _, (start, end) in stages:
             ax.axvline(start, color="gray", alpha=0.15)
             ax.axvline(end, color="gray", alpha=0.15)
-    title = "Atom to transmon"
+    title = "Write–store–read: transmon return" if roundtrip else "Atom to transmon"
     subtitle = "After writing and storage" if roundtrip else f"Retrieval from {source} memory"
     fig.suptitle(title + "\n" + subtitle)
     fig.canvas.manager.set_window_title(title)
@@ -1288,7 +1378,7 @@ def all_figures(save=False):
     """Build the two compact windows before a single blocking show call."""
     jobs = [
         ("Transmon to atom", lambda: main(save=save)),
-        ("Atom to transmon", lambda: retrieval_main(roundtrip=True, save=save)),
+        ("Atom to transmon", lambda: retrieval_main(save=save)),
     ]
     for index, (name, build) in enumerate(jobs, start=1):
         print(f"Generating figure {index}/{len(jobs)}: {name}", flush=True)
@@ -1316,12 +1406,12 @@ if __name__ == "__main__":
     parser.add_argument("--no-show", action="store_true",
                         help="Do not open plot windows (for unattended runs).")
     parser.add_argument("--all-figures", action="store_true",
-                        help="Generate the write/store and retrieval windows (default).")
+                        help="Generate independent transmon-to-atom and atom-to-transmon windows (default).")
     parser.add_argument("--write-paper-figure", action="store_true",
                         help="Paper-style preparation, dynamics, and write probabilities.")
     parser.add_argument("--run", action="store_true", help="Run figures directly, bypassing the startup panel.")
     parser.add_argument("--config", help="JSON object of parameter overrides.")
-    parser.add_argument("--write-only", action="store_true", help="Only the write/store figure.")
+    parser.add_argument("--write-only", action="store_true", help="Only the transmon-to-atom transfer figure.")
     args = parser.parse_args()
     selected_modes = sum((args.paper_figure, args.retrieve, args.roundtrip,
                           args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only))

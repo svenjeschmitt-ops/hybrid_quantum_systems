@@ -37,7 +37,7 @@ from hybrid_settings import FIELDS, DEFAULTS, validate, derived
 MODES = [
 ("Both transfer directions", []),
 ("Transmon to atom", ["--write-only"]),
-("Atom to transmon", ["--roundtrip"]),
+("Atom to transmon", ["--retrieve"]),
 ]
 
 
