@@ -41,25 +41,175 @@ MODES = [
 ]
 
 
-def coupling_equations_png(dpi=120):
-    """Typeset the coupling equations without a LaTeX installation or GUI backend."""
+# Symbols use the same notation as the equations beneath each tab.
+PARAMETER_SYMBOLS = {
+    "FC": r"f_c",
+    "PHI_SWAP": r"\phi_{\mathrm{swap}}",
+    "V_SWAP": r"V_{\mathrm{swap}}",
+    "EC": r"\epsilon_C=E_C/h",
+    "EJ_MAX": r"\epsilon_{J,\max}=E_{J,\max}/h",
+    "ASYMMETRY": r"d",
+    "PHI_PARK": r"\phi_{\mathrm{park}}",
+    "BETA": r"\beta",
+    "V_ZPF_UV": r"V_{\mathrm{zpf}}",
+    "D_01_EA0": r"|d_{01}|",
+    "E_ZPF_V_PER_M": r"E_{\mathrm{zpf}}",
+    "DIPOLE_ALIGNMENT": r"\cos\theta",
+    "F_A_ZERO": r"f_{A,0}",
+    "K_R0": r"K_{r0}",
+    "K_R1": r"K_{r1}",
+    "K_WRONG": r"K_w",
+    "GAP_CM": r"\ell",
+    "STRAY_FIELD": r"E_{\mathrm{stray}}",
+    "E_PARK": r"E_{\mathrm{park}}",
+    "F_WRONG_SPLIT": r"f_{\mathrm{wrong,split}}",
+    "REL_WRONG_DIPOLE": r"\eta",
+    "T1_T": r"T_{1,T}",
+    "TPHI_T": r"T_{\phi,T}",
+    "T1_C": r"T_{1,c}",
+    "TAU_R0": r"\tau_{r0}",
+    "TAU_R1": r"\tau_{r1}",
+    "TAU_WRONG": r"\tau_w",
+    "TPHI_R": r"T_{\phi,R}",
+    "TPHI_H": r"T_{\phi,H}",
+    "OMEGA": r"\Omega_{\max}/(2\pi)",
+    "RAMP": r"T_{\mathrm{ramp}}",
+    "GAP": r"T_{\mathrm{gap}}",
+    "STORAGE": r"T_{\mathrm{storage}}",
+    "INPUT_THETA": r"\vartheta",
+    "INPUT_PHI": r"\varphi",
+    "MAX_STEP": r"\Delta t_{\max}",
+    "NC": r"N_c",
+}
+
+# Keep prose labels free of duplicate plain-text versions of typeset symbols.
+PARAMETER_CAPTIONS = {
+    "EC": "Charging energy",
+    "EJ_MAX": "Maximum Josephson energy",
+    "BETA": "Capacitive participation",
+    "D_01_EA0": "Atomic transition dipole magnitude",
+    "DIPOLE_ALIGNMENT": "Dipole-field alignment",
+    "OMEGA": "Peak effective optical Rabi frequency",
+}
+
+
+def parameter_symbol_png(key, dpi=120):
+    """Render one inline symbol with real Greek letters and subscripts."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
-    figure=Figure(figsize=(5.6,1.25),dpi=dpi)
+    figure=Figure(figsize=(2,.4),dpi=dpi)
     FigureCanvasAgg(figure)
-    equations=(
-        r"$g_{\mathrm{TC}} \approx \frac{2e\beta V_{\mathrm{zpf}}}{\hbar}"
-        r"\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
-        r"$g_{\mathrm{AC}} = \frac{\left|\mathbf{d}_{01}\cdot"
-        r"\mathbf{E}_{\mathrm{zpf}}\right|}{\hbar}"
-        r"= \frac{|d_{01}|E_{\mathrm{zpf}}|\cos\theta|}{\hbar}$",
-    )
-    for y,equation in zip((0.75,0.20),equations):
-        figure.text(0.02,y,equation,fontsize=18,math_fontfamily="stix",color="#242424")
+    figure.text(0,.5,"$"+PARAMETER_SYMBOLS[key]+"$",va="center",
+                fontsize=14,math_fontfamily="stix",color="#242424")
     output=io.BytesIO()
-    figure.savefig(output,format="png",transparent=True,bbox_inches="tight",pad_inches=0.08)
+    figure.savefig(output,format="png",transparent=True,bbox_inches="tight",pad_inches=.025)
     return output.getvalue()
+
+
+# Equations describe the implemented model; epsilon denotes energy divided by h.
+SECTION_EQUATIONS = {
+    "Cavity and transmon": (
+        (
+            r"$\epsilon_C=E_C/h,\quad \epsilon_J(\phi)=\epsilon_{J,\max}\sqrt{\cos^2(\pi\phi)+d^2\sin^2(\pi\phi)},\quad \phi=\Phi/\Phi_0$",
+            r"$f_T(\phi)\approx\sqrt{8\epsilon_C\epsilon_J(\phi)}-\epsilon_C,\qquad \Delta_T(t)=2\pi[f_T(\phi(t))-f_c]$",
+            r"$f_{T,\mathrm{int}}=f_T(\phi_{\mathrm{swap}}),\qquad f_{T,\mathrm{park}}=f_T(\phi_{\mathrm{park}})$",
+            r"$\Delta_{T,\mathrm{int}}=2\pi(f_{T,\mathrm{int}}-f_c),\qquad \mathrm{resonance}:\ f_{T,\mathrm{int}}=f_c$",
+            r"$\phi(t)=\phi_{\mathrm{park}}+[\phi_{\mathrm{swap}}-\phi_{\mathrm{park}}]w_{TC}(t)$",
+            r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)\,\sigma_+\sigma_-$",
+        ),
+        "Energies divided by h are entered in MHz. d is SQUID junction asymmetry. "
+        "Interaction and parked flux inputs use 0 ≤ flux / flux quantum ≤ 0.5. The applied interaction flux sets the calculated transmon frequency independently of f_c. Resonance requires f_T,int = f_c; coupling sets the nominal swap hold. "
+        "w_TC(t) is zero outside the interaction pulse and one during its flat hold, with raised-cosine ramps. The parked flux sets idle detuning to suppress unwanted exchange while coupling remains active.",
+    ),
+    "Coupling parameters": (
+        (
+            r"$g_{\mathrm{TC}}\approx\frac{2e\beta V_{\mathrm{zpf}}}{\hbar}\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
+            r"$g_{\mathrm{AC}}=\frac{|\mathbf{d}_{01}\cdot\mathbf{E}_{\mathrm{zpf}}|}{\hbar}=\frac{|d_{01}|E_{\mathrm{zpf}}|\cos\theta|}{\hbar}$",
+            r"$f_{\mathrm{swap},TC}=2g_{TC}/(2\pi),\qquad f_{\mathrm{swap},AC}=2g_{AC}/(2\pi),\qquad t_{\mathrm{hold}}=1/(2f_{\mathrm{swap}})$",
+            r"$\beta=\frac{C_g}{C_\Sigma},\qquad n_{01}\approx\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
+        ),
+        "Use local vacuum RMS voltage and field amplitudes. C_g is the coupling capacitance; "
+        "C_Σ is total transmon capacitance. The charge matrix element is calculated at the swap point. "
+        "Couplings stay constant during a run. Swap frequencies shown are nominal resonant population oscillation rates; detuning reduces transfer.",
+    ),
+    "Atom and electrodes": (
+        (
+            r"$E(t)=\frac{V(t)}{\ell}+E_{\mathrm{stray}},\qquad f_A(E)=f_{A,0}+(K_{r1}-K_{r0})E^2$",
+            r"$E_{\mathrm{swap}}=\frac{V_{\mathrm{swap}}}{\ell}+E_{\mathrm{stray}},\qquad f_{A,\mathrm{swap}}=f_{A,0}+(K_{r1}-K_{r0})E_{\mathrm{swap}}^2$",
+            r"$V_{\mathrm{park}}=\ell(E_{\mathrm{park}}-E_{\mathrm{stray}}),\qquad \Delta_A(t)=2\pi[f_A(E(t))-f_c]$",
+            r"$\Delta_{w,r0}(E)=2\pi[f_{\mathrm{wrong,split}}+(K_w-K_{r0})E^2],\qquad \Omega_w(t)=\eta\,\Omega(t)$",
+        ),
+        "ℓ is electrode separation in cm; E is in V/cm and K is in MHz/(V/cm)². "
+        "Stark coefficients include their sign and −α/(2h). "
+        "η is relative unwanted optical amplitude. The applied swap voltage is independent of f_c. "
+        "Changing the cavity frequency does not retune the voltage.",
+    ),
+    "Loss and coherence": (
+        (
+            r"$L_T=\frac{\sigma_-}{\sqrt{T_{1,T}}},\qquad L_c=\frac{a}{\sqrt{T_{1,c}}},\qquad L_{rj}=\frac{|\mathrm{loss}\rangle\langle r_j|}{\sqrt{\tau_{rj}}}$",
+            r"$L_{\phi,T}=\frac{Z_T}{\sqrt{2T_{\phi,T}}},\qquad L_{\phi,R}=\frac{Z_R}{\sqrt{2T_{\phi,R}}},\qquad L_{\phi,H}=\frac{Z_H}{\sqrt{2T_{\phi,H}}}$",
+            r"$Z_T=P_e-P_g,\qquad Z_R=P_{r1}-P_{r0},\qquad Z_H=P_{h1}-P_{h0}$",
+            r"$\frac{1}{T_{2,T}}=\frac{1}{2T_{1,T}}+\frac{1}{T_{\phi,T}},\qquad Q_c=2\pi f_cT_{1,c}$",
+        ),
+        "All lifetimes are in μs; T_phi denotes pure dephasing, not total T2. "
+        "Rydberg decay includes r0, r1, and the unwanted level. P_s = |s⟩⟨s|. "
+        "The T2 relation shown is for the transmon; cavity T1 is photon-number lifetime.",
+    ),
+    "Pulses and input state": (
+        (
+            r"$\Omega(t)=\Omega_{\max}\sin^2\!\left(\frac{\pi(t-t_0)}{T_{\mathrm{opt}}}\right),\quad \int_{t_0}^{t_0+T_{\mathrm{opt}}}\Omega(t)\,dt=\pi,\quad T_{\mathrm{opt}}=\frac{2\pi}{\Omega_{\max}}$",
+            r"$t_{\mathrm{hold},TC}=\frac{\pi}{2g_{TC}},\qquad t_{\mathrm{hold},AC}=\frac{\pi}{2g_{AC}},\qquad T_{\mathrm{swap}}=2T_{\mathrm{ramp}}+t_{\mathrm{hold}}$",
+            r"$w_{\mathrm{rise}}(u)=\frac{1-\cos(\pi u/T_{\mathrm{ramp}})}{2},\qquad 0\leq u\leq T_{\mathrm{ramp}}$",
+            r"$|\psi_T\rangle=\cos(\vartheta/2)|g\rangle+e^{i\varphi}\sin(\vartheta/2)|e\rangle,\qquad t_{\mathrm{end}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
+        ),
+        "The OMEGA input is Ω_max / (2π) in MHz; times are in μs. Optical envelopes vanish outside "
+        "their pulse intervals. Ramps use a raised cosine, a flat hold, and a reversed falling ramp. "
+        "GAP separates operations. Input Bloch angles are entered in degrees. "
+        "Swap holds are nominal isolated, resonant values.",
+    ),
+    "Numerics": (
+        (
+            r"$\dot\rho=-i[H,\rho]+\sum_k\left(L_k\rho L_k^\dagger-\frac{1}{2}\{L_k^\dagger L_k,\rho\}\right)$",
+            r"$i\,\frac{d|\psi\rangle}{dt}=H|\psi\rangle\quad\mathrm{(noiseless)},\qquad \Delta t_{\mathrm{internal}}\leq\Delta t_{\max}=\mathrm{MAX\_STEP}$",
+            r"$D=2\,N_c\,6=12N_c,\qquad n_{\mathrm{cavity}}\in\{0,\ldots,N_c-1\},\qquad N_c\geq3$",
+        ),
+        "H is expressed in angular-frequency units (rad/μs). MAX_STEP limits internal integration steps, "
+        "not plot sampling. The transfer solver uses DOP853, absolute tolerance 10⁻¹¹ and relative "
+        "tolerance 10⁻⁹. N_c is the cavity truncation; transmon and atom use 2 and 6 states. "
+        "Check convergence by reducing MAX_STEP and increasing N_c.",
+    ),
+}
+
+
+def section_equations_png(group, dpi=120, max_width=None):
+    """Typeset a tab's equations without an external LaTeX installation."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    equations, _ = SECTION_EQUATIONS[group]
+    height = .66 * len(equations)
+    figure=Figure(figsize=(8.4,height),dpi=dpi)
+    FigureCanvasAgg(figure)
+    for index,equation in enumerate(equations):
+        figure.text(0.01,1-(index+.5)/len(equations),equation,va="center",
+                    fontsize=16,math_fontfamily="stix",color="#242424")
+    if max_width is not None:
+        figure.canvas.draw()
+        renderer=figure.canvas.get_renderer()
+        text_width=max(text.get_window_extent(renderer).width for text in figure.texts)
+        scale=min(1.0,max(1,max_width-.2*dpi)/text_width)
+        for text in figure.texts:
+            text.set_fontsize(text.get_fontsize()*scale)
+        figure.set_figheight(height*scale)
+    output=io.BytesIO()
+    figure.savefig(output,format="png",transparent=True,bbox_inches="tight",pad_inches=0.10)
+    return output.getvalue()
+
+
+def coupling_equations_png(dpi=120):
+    """Compatibility wrapper for the coupling-equation renderer."""
+    return section_equations_png("Coupling parameters", dpi=dpi)
 
 
 class ParameterPanel:
@@ -73,10 +223,13 @@ class ParameterPanel:
         self.events=queue.Queue()
         self.temp_path=None
         root.title("Hybrid quantum memory — simulation parameters")
-        root.geometry("1000x820")
-        root.minsize(850,650)
+        width=min(1800,int(root.winfo_screenwidth()*.96))
+        height=min(1100,int(root.winfo_screenheight()*.90))
+        root.geometry(f"{width}x{height}")
+        root.minsize(min(width,1100),min(height,700))
         self.entries={}
-        self.coupling_summary=tk.StringVar()
+        self.equation_images={}
+        self.symbol_images={}
         outer=ttk.Frame(root,padding=14)
         outer.pack(fill="both",expand=True)
         ttk.Label(outer,text="Hybrid quantum memory",font=("",18,"bold")).pack(anchor="w")
@@ -85,33 +238,48 @@ class ParameterPanel:
         self.tabs.pack(fill="both",expand=True)
         groups=list(dict.fromkeys(row[0] for row in FIELDS))
         for group in groups:
-            frame=ttk.Frame(self.tabs,padding=12)
-            self.tabs.add(frame,text=group)
+            tab=ttk.Frame(self.tabs)
+            self.tabs.add(tab,text=group)
+            tab.columnconfigure(0,weight=1)
+            tab.columnconfigure(1,weight=1)
+            tab.rowconfigure(0,weight=1)
+            frame=ttk.Frame(tab,padding=12)
+            frame.grid(row=0,column=0,sticky="new")
             frame.columnconfigure(1,weight=1)
+            equations=ttk.Frame(tab,padding=(12,16,12,12))
+            equations.grid(row=0,column=1,sticky="new")
+            equations.columnconfigure(0,weight=1)
             for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group):
-                ttk.Label(frame,text=label).grid(row=row,column=0,sticky="w",padx=(0,12),pady=7)
+                label_cell=ttk.Frame(frame)
+                label_cell.grid(row=row,column=0,sticky="w",padx=(0,12),pady=7)
+                ttk.Label(label_cell,text=PARAMETER_CAPTIONS.get(key,label)).pack(side="left")
+                self.symbol_images[key]=tk.PhotoImage(
+                    master=root,data=base64.b64encode(
+                        parameter_symbol_png(key,dpi=root.winfo_fpixels("1i"))).decode("ascii"))
+                ttk.Label(label_cell,image=self.symbol_images[key]).pack(side="left",padx=(8,0))
                 value=tk.StringVar(value=str(default))
                 entry=ttk.Entry(frame,textvariable=value,width=18)
                 entry.grid(row=row,column=1,sticky="ew",pady=7)
                 ttk.Label(frame,text=units).grid(row=row,column=2,sticky="w",padx=10)
                 self.entries[key]=value
-                value.trace_add("write",self.update_couplings)
+            if group == "Cavity and transmon":
+                self.transmon_tuning=tk.StringVar()
+                ttk.Label(frame,textvariable=self.transmon_tuning,wraplength=int(width*.4)).grid(
+                    row=row+1,column=0,columnspan=3,sticky="w",pady=(12,0))
             if group == "Coupling parameters":
-                self.coupling_equations=tk.PhotoImage(
-                    master=root,data=base64.b64encode(
-                        coupling_equations_png(dpi=root.winfo_fpixels("1i"))).decode("ascii"))
-                ttk.Label(frame,image=self.coupling_equations).grid(
-                    row=row+1,column=0,columnspan=3,sticky="w",pady=(12,6))
-                ttk.Label(frame,text="Use local vacuum RMS voltage and field amplitudes.\n"
-                                     "Charge matrix element is calculated as [E_J(swap)/(32 E_C)]^(1/4). "
-                                     "Couplings stay constant during a run.",
-                          wraplength=800).grid(row=row+2,column=0,columnspan=3,sticky="w",pady=(0,8))
-        ttk.Label(outer,textvariable=self.coupling_summary).pack(anchor="w",pady=(8,0))
-        self.update_couplings()
-        ttk.Label(outer,text="Couplings are calculated from device and atomic inputs; cavity geometry is not solved.\n"
-                            "Swap flux and voltage are calculated for resonance with the cavity.\n"
-                            "Stark coefficients include their sign and the factor -alpha/(2h). Pure dephasing times are not total T2.",
-                  wraplength=940).pack(anchor="w",pady=(10,6))
+                self.swap_rates=tk.StringVar()
+                ttk.Label(frame,textvariable=self.swap_rates,wraplength=int(width*.4)).grid(
+                    row=row+1,column=0,columnspan=3,sticky="w",pady=(12,0))
+            self.equation_images[group]=tk.PhotoImage(
+                master=root,data=base64.b64encode(section_equations_png(
+                    group,dpi=root.winfo_fpixels("1i"),max_width=int(width*.45))).decode("ascii"))
+            ttk.Label(equations,image=self.equation_images[group]).grid(
+                row=0,column=0,sticky="w",pady=(0,12))
+            note=ttk.Label(equations,text=SECTION_EQUATIONS[group][1],
+                           wraplength=int(width*.43))
+            note.grid(row=1,column=0,sticky="ew")
+            equations.bind("<Configure>",lambda event,label=note:
+                           label.configure(wraplength=max(200,event.width-24)))
         controls=ttk.Frame(outer)
         controls.pack(fill="x")
         ttk.Label(controls,text="Output:").pack(side="left")
@@ -132,28 +300,40 @@ class ParameterPanel:
         self.stop_button.pack(side="right",padx=6)
         self.status=tk.StringVar(value="Ready. Default parameters are illustrative, not an experimentally validated design.")
         ttk.Label(outer,textvariable=self.status,wraplength=940).pack(anchor="w",pady=4)
-        self.log=tk.Text(outer,height=8,wrap="word",state="disabled")
+        self.log=tk.Text(outer,height=4,wrap="word",state="disabled")
         self.log.pack(fill="x")
+        for value in self.entries.values():
+            value.trace_add("write",self.update_swap_rates)
+        self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.root.after(100,self.poll)
 
+    def update_swap_rates(self,*_):
+        try:
+            config=self.config()
+            d=derived(config)
+        except ValueError:
+            self.transmon_tuning.set("Enter valid model parameters to calculate detuning.")
+            self.swap_rates.set("Calculated swap rates: enter valid model parameters.")
+            return
+        detuning=d['transmon_swap_detuning_MHz']
+        condition="resonant" if abs(detuning)<1e-8 else "detuned"
+        self.transmon_tuning.set(
+            f"Transmon {d['transmon_interaction_frequency_MHz']:.6g} MHz; cavity {config['FC']:.6g} MHz.\n"
+            f"Interaction detuning (f_T - f_c): {detuning:+.6g} MHz ({condition}).\n"
+            f"Parked transmon {d['transmon_park_frequency_MHz']:.6g} MHz; "
+            f"detuning: {d['transmon_park_frequency_MHz']-config['FC']:+.6g} MHz.\n"
+            "Tune the interaction flux to set the transmon resonance frequency.")
+        self.swap_rates.set(
+            f"Nominal resonant swap frequencies: TC {d['transmon_swap_frequency_MHz']:.5g} MHz; "
+            f"AC {d['atom_swap_frequency_MHz']:.5g} MHz.\n"
+            f"Nominal resonant holds: TC {d['transmon_swap_hold_us']:.5g} us; "
+            f"AC {d['atom_swap_hold_us']:.5g} us.\n"
+            f"Plateau detuning TC/AC: {d['transmon_swap_detuning_MHz']:.5g} / "
+            f"{d['atom_swap_detuning_MHz']:.5g} MHz.")
+
     def config(self):
         return validate({key:value.get() for key,value in self.entries.items()})
-
-    def update_couplings(self,*_):
-        # Traces can fire while entries are still being constructed.
-        if len(self.entries) != len(FIELDS):
-            return
-        try:
-            d=derived(self.config())
-            self.coupling_summary.set(
-                f"Calculated |n01|: {d['transmon_charge_matrix_element']:.6g}; "
-                f"g(TC) / 2π: {d['transmon_coupling_MHz']:.6g} MHz; "
-                f"g(AC) / 2π: {d['atom_coupling_MHz']:.6g} MHz\n"
-                f"Calculated swap flux / flux quantum: {d['swap_flux']:.6g}; "
-                f"swap electrode voltage: {d['resonance_voltage_V']:.6g} V")
-        except ValueError:
-            self.coupling_summary.set("Calculated couplings unavailable: check parameter values.")
 
     def append(self,text):
         self.log.configure(state="normal")

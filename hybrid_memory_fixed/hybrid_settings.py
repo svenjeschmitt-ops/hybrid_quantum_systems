@@ -11,14 +11,15 @@ BOHR_RADIUS = 5.29177210544e-11
 # Group, key, label, units, default, positive/nonnegative/free/integer.
 FIELDS = [
 ("Cavity and transmon","FC","Cavity frequency","MHz",5000.0,"positive"),
+("Cavity and transmon","PHI_SWAP","Transmon flux during interaction","Phi/Phi0",0.2597137967167845,"nonnegative"),
 ("Cavity and transmon","EC","Charging energy E_C / h","MHz",250.0,"positive"),
 ("Cavity and transmon","EJ_MAX","Maximum Josephson energy / h","MHz",20000.0,"positive"),
 ("Cavity and transmon","ASYMMETRY","SQUID junction asymmetry","dimensionless",0.10,"nonnegative"),
-("Cavity and transmon","F_T_PARK","Parked transmon frequency","MHz",5800.0,"positive"),
-("Coupling parameters","BETA","Capacitive participation beta","dimensionless",0.10,"positive"),
+("Cavity and transmon","PHI_PARK","Parked transmon flux","Phi/Phi0",0.13284821090062188,"nonnegative"),
+("Coupling parameters","BETA","Capacitive participation beta","dimensionless",0.01,"positive"),
 ("Coupling parameters","V_ZPF_UV","Cavity zero-point voltage at transmon","uV",0.5,"positive"),
 ("Coupling parameters","D_01_EA0","Atomic transition dipole magnitude |d_01|","e a0",1000.0,"positive"),
-("Coupling parameters","E_ZPF_V_PER_M","Cavity zero-point field at atom","V/m",0.04,"positive"),
+("Coupling parameters","E_ZPF_V_PER_M","Cavity zero-point field at atom","V/m",0.08,"positive"),
 ("Coupling parameters","DIPOLE_ALIGNMENT","Dipole-field alignment cos(theta)","dimensionless",1.0,"free"),
 ("Atom and electrodes","F_A_ZERO","Zero-field Rydberg transition","MHz",5150.0,"positive"),
 ("Atom and electrodes","K_R0","Lower Rydberg Stark coefficient","MHz/(V/cm)^2",-2.0,"free"),
@@ -26,6 +27,7 @@ FIELDS = [
 ("Atom and electrodes","K_WRONG","Unwanted-level Stark coefficient","MHz/(V/cm)^2",-2.0,"free"),
 ("Atom and electrodes","GAP_CM","Electrode separation","cm",0.10,"positive"),
 ("Atom and electrodes","STRAY_FIELD","Static stray electric field","V/cm",0.20,"free"),
+("Atom and electrodes","V_SWAP","Applied swap voltage","V",0.3672983346207417,"free"),
 ("Atom and electrodes","E_PARK","Parked total electric field","V/cm",0.0,"free"),
 ("Atom and electrodes","F_WRONG_SPLIT","Unwanted-level frequency separation","MHz",1320.0,"free"),
 ("Atom and electrodes","REL_WRONG_DIPOLE","Relative unwanted optical amplitude","dimensionless",1.0,"nonnegative"),
@@ -37,8 +39,8 @@ FIELDS = [
 ("Loss and coherence","TAU_WRONG","Unwanted Rydberg lifetime","us",100.0,"positive"),
 ("Loss and coherence","TPHI_R","Rydberg-pair pure dephasing time","us",100.0,"positive"),
 ("Loss and coherence","TPHI_H","Hyperfine pure dephasing time","us",100000.0,"positive"),
-("Pulses and input state","OMEGA","Peak effective optical Rabi frequency / 2pi","MHz",10.0,"positive"),
-("Pulses and input state","RAMP","Flux/voltage ramp duration","us",0.002,"positive"),
+("Pulses and input state","OMEGA","Peak effective optical Rabi frequency / 2pi","MHz",20.0,"positive"),
+("Pulses and input state","RAMP","Flux/voltage ramp duration","us",0.0005,"positive"),
 ("Pulses and input state","GAP","Delay between operations","us",0.01,"nonnegative"),
 ("Pulses and input state","STORAGE","Memory storage duration","us",5.0,"nonnegative"),
 ("Pulses and input state","INPUT_THETA","Input Bloch polar angle","degrees",90.0,"free"),
@@ -50,12 +52,13 @@ DEFAULTS = {key: default for _,key,_,_,default,_ in FIELDS}
 
 
 def transmon_operating_point(config):
-    """Approximate n_01 from the effective EJ/h at the resonant swap flux."""
-    phi = calculated_flux(config, config["FC"])
+    """Approximate n_01 from the effective EJ/h at the applied interaction flux."""
+    phi = config["PHI_SWAP"]
     ej = config["EJ_MAX"] * math.sqrt(math.cos(math.pi*phi)**2
                                     + config["ASYMMETRY"]**2 * math.sin(math.pi*phi)**2)
     return {
         "transmon_swap_EJ_MHz": ej,
+        "transmon_interaction_frequency_MHz": math.sqrt(8*config["EC"]*ej) - config["EC"],
         "transmon_charge_matrix_element": (ej/(32*config["EC"]))**0.25,
     }
 
@@ -79,44 +82,36 @@ def coupling_strengths(config):
     }
 
 
-def calculated_flux(config, frequency):
-    """Invert the SQUID transmon relation on 0 <= Phi/Phi0 <= 0.5."""
-    ratio = (frequency + config["EC"])**2 / (8*config["EC"]*config["EJ_MAX"])
-    d = config["ASYMMETRY"]
-    if not d <= ratio <= 1:
-        raise ValueError("Requested transmon frequency is outside tuning range.")
-    cosine_squared = (ratio**2 - d**2)/(1-d**2)
-    return math.acos(math.sqrt(max(0.0, min(1.0, cosine_squared))))/math.pi
+def calculated_transmon_frequency(config, phi):
+    """Return the transmon transition frequency in MHz at applied flux Phi/Phi0."""
+    ej = config["EJ_MAX"] * math.hypot(math.cos(math.pi*phi),
+                                    config["ASYMMETRY"]*math.sin(math.pi*phi))
+    return math.sqrt(8*config["EC"]*ej) - config["EC"]
 
 
 def calculated_swap_field(config):
-    """Total field for atom-cavity resonance, choosing the positive root."""
-    differential_stark = config["K_R1"] - config["K_R0"]
-    if differential_stark == 0:
-        if config["FC"] == config["F_A_ZERO"]:
-            return config["E_PARK"]  # Already resonant at any field.
-        raise ValueError("Equal Rydberg Stark coefficients cannot tune the atom to this cavity.")
-    field_squared = (config["FC"] - config["F_A_ZERO"])/differential_stark
-    if field_squared < 0:
-        raise ValueError("These Stark coefficients cannot tune the atomic transition to this cavity.")
-    return math.sqrt(field_squared)
+    """Total field produced by the applied swap voltage and stray field."""
+    return config["V_SWAP"] / config["GAP_CM"] + config["STRAY_FIELD"]
 
 
 def validate(values):
     if not isinstance(values, dict):
         raise ValueError("Settings must be a JSON object.")
+    if "F_SWAP_TARGET" in values:
+        raise ValueError("F_SWAP_TARGET has been removed. Remove it from saved settings; "
+                         "use PHI_SWAP for the transmon interaction flux. Swap rates come from the couplings.")
+    if "F_T_INTERACTION" in values:
+        raise ValueError("F_T_INTERACTION is now calculated from PHI_SWAP. "
+                         "Replace F_T_INTERACTION with the applied interaction flux PHI_SWAP in saved settings.")
+    if "F_T_PARK" in values:
+        raise ValueError("F_T_PARK is now calculated from PHI_PARK. "
+                         "Replace F_T_PARK with the applied parked flux PHI_PARK in saved settings.")
     if {"G_TC", "G_AC"} & set(values):
         raise ValueError("G_TC and G_AC are now calculated. Replace coupling inputs with "
                          "BETA, V_ZPF_UV, D_01_EA0, E_ZPF_V_PER_M, and DIPOLE_ALIGNMENT.")
     if "N_01" in values:
         raise ValueError("N_01 is now calculated from the effective Josephson energy at "
                          "the swap flux and EC. Remove N_01 from saved settings.")
-    if "PHI_SWAP" in values:
-        raise ValueError("PHI_SWAP is now calculated from FC, EC, EJ_MAX, and ASYMMETRY. "
-                         "Remove PHI_SWAP from saved settings.")
-    if "V_SWAP" in values:
-        raise ValueError("V_SWAP is now calculated from the cavity and atomic parameters. "
-                         "Remove V_SWAP from saved settings.")
     unknown = set(values) - set(DEFAULTS)
     if unknown:
         raise ValueError("Unknown settings: " + ", ".join(sorted(unknown)))
@@ -146,12 +141,11 @@ def validate(values):
         raise ValueError("Dipole-field alignment cos(theta) must be between -1 and 1.")
     if not 0 <= config["INPUT_THETA"] <= 180:
         raise ValueError("Input polar angle must be between 0 and 180 degrees.")
-    for key, label in (("FC", "Cavity"), ("F_T_PARK", "Parked transmon")):
-        try:
-            calculated_flux(config, config[key])
-        except ValueError:
-            raise ValueError(label + " frequency is outside the SQUID tuning range.") from None
-    calculated_swap_field(config)
+    for key, label in (("PHI_SWAP", "Interaction"), ("PHI_PARK", "Parked")):
+        if not 0 <= config[key] <= 0.5:
+            raise ValueError(label + " transmon flux must be between 0 and 0.5 Phi/Phi0.")
+        if calculated_transmon_frequency(config, config[key]) <= 0:
+            raise ValueError(label + " flux gives a nonpositive transmon frequency; use a transmon operating point with EJ >> EC.")
     for label, value in coupling_strengths(config).items():
         if not math.isfinite(value) or value <= 0:
             raise ValueError(label + " must be finite and greater than zero for swap timing.")
@@ -161,20 +155,25 @@ def validate(values):
 def derived(config):
     c=validate(config)
     couplings=coupling_strengths(c)
+    operating_point=transmon_operating_point(c)
     differential_stark = c["K_R1"] - c["K_R0"]
     swap_field = calculated_swap_field(c)
-    swap_voltage = c["GAP_CM"]*(swap_field-c["STRAY_FIELD"])
-    swap_flux = calculated_flux(c, c["FC"])
+    swap_voltage = c["V_SWAP"]
+    swap_flux = c["PHI_SWAP"]
     return {
         **couplings,
-        **transmon_operating_point(c),
-        "resonance_field_V_per_cm": swap_field,
-        "resonance_voltage_V": swap_voltage,
+        **operating_point,
+        "transmon_park_frequency_MHz": calculated_transmon_frequency(c, c["PHI_PARK"]),
+        "swap_field_V_per_cm": swap_field,
+        "swap_voltage_V": swap_voltage,
         "swap_flux": swap_flux,
-        "transmon_swap_detuning_MHz": 0.0,
+        "transmon_swap_detuning_MHz": (
+            operating_point["transmon_interaction_frequency_MHz"] - c["FC"]),
         "atom_swap_detuning_MHz": c["F_A_ZERO"]+differential_stark*swap_field**2-c["FC"],
         "park_voltage_V": c["GAP_CM"]*(c["E_PARK"]-c["STRAY_FIELD"]),
         "optical_pi_pulse_us": 1/c["OMEGA"],
+        "transmon_swap_frequency_MHz": 2*couplings["transmon_coupling_MHz"],
+        "atom_swap_frequency_MHz": 2*couplings["atom_coupling_MHz"],
         "transmon_swap_hold_us": 1/(4*couplings["transmon_coupling_MHz"]),
         "atom_swap_hold_us": 1/(4*couplings["atom_coupling_MHz"]),
         "cavity_Q": 2*math.pi*c["FC"]*c["T1_C"],

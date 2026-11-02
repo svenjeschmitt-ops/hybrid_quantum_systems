@@ -32,7 +32,7 @@ if _config_args.config:
     except (OSError, ValueError) as exc:
         _config_parser.error(f"Cannot load config {_config_args.config!r}: {exc}")
 
-from hybrid_settings import validate, coupling_strengths, derived, calculated_flux, calculated_swap_field
+from hybrid_settings import validate, coupling_strengths, derived, calculated_transmon_frequency, calculated_swap_field, transmon_operating_point
 _SETTINGS = validate(_SETTINGS)
 _COUPLINGS = coupling_strengths(_SETTINGS)
 
@@ -42,11 +42,12 @@ def parameter(name, default):
 TWOPI = 2 * np.pi
 
 # Device parameters: EJ/h and EC/h, in MHz.
-FC = parameter("FC", 5000.0) # cavity resonance frequency
+FC = parameter("FC", 5000.0) # actual cavity frequency in the Hamiltonian
+F_T_INTERACTION = transmon_operating_point(_SETTINGS)["transmon_interaction_frequency_MHz"]
 EC = parameter("EC", 250.0) # transmon charging energy
 EJ_MAX = parameter("EJ_MAX", 20000.0) # maximum JJ energy
 ASYMMETRY = parameter("ASYMMETRY", 0.10) # asymmetry between JJ
-F_T_PARK = parameter("F_T_PARK", 5800.0) # transmon frequency before its changing with the cavity
+F_T_PARK = calculated_transmon_frequency(_SETTINGS, _SETTINGS["PHI_PARK"])
 # Derived g/(2*pi) in MHz -> angular coupling in rad/us for the Hamiltonian.
 G_TC = TWOPI * _COUPLINGS["transmon_coupling_MHz"]
 G_AC = TWOPI * _COUPLINGS["atom_coupling_MHz"]
@@ -60,9 +61,9 @@ K_R1 = parameter("K_R1", -12.0)
 GAP_CM = parameter("GAP_CM", 0.10)
 STRAY_FIELD = parameter("STRAY_FIELD", 0.20)
 E_PARK = parameter("E_PARK", 0.0)
-# Calculate the positive-field atom-cavity resonance and compensate stray field.
+# Applied control voltage is independent of the cavity frequency.
 E_SWAP = calculated_swap_field(_SETTINGS)
-V_SWAP = GAP_CM * (E_SWAP - STRAY_FIELD)
+V_SWAP = _SETTINGS["V_SWAP"]
 
 # Coherence times (us), phenomenological Markovian rates.
 T1_T = parameter("T1_T", 100.0)
@@ -80,18 +81,16 @@ TPHI_R = parameter("TPHI_R", 100.0)
 TPHI_H = parameter("TPHI_H", 100000.0)
 
 # Smooth optical pulses: integral Omega(t) dt = pi.
-OMEGA = TWOPI * parameter('OMEGA', 10.0)
+OMEGA = TWOPI * parameter('OMEGA', 20.0)
 T_OPT = TWOPI / OMEGA  # sin^2 envelope averages to 1/2
-RAMP = parameter("RAMP", 0.002)
+RAMP = parameter("RAMP", 0.0005)
 GAP = parameter("GAP", 0.01)
 STORAGE = parameter("STORAGE", 5.0)
 MAX_STEP = parameter("MAX_STEP", 0.0005)
 
-def flux_for_frequency(f):
-    return calculated_flux(_SETTINGS, f)
-
-PHI_PARK = flux_for_frequency(F_T_PARK)
-PHI_SWAP = flux_for_frequency(FC)
+PHI_PARK = _SETTINGS["PHI_PARK"]
+# Applied interaction flux sets the resonance independently of FC.
+PHI_SWAP = _SETTINGS["PHI_SWAP"]
 
 def transmon_frequency(phi):
     ej = EJ_MAX * np.sqrt(
@@ -812,11 +811,12 @@ def plot_storage_fidelity(ax, save=False):
         ax.plot(data[:, 0], data[:, column], style, label=label)
     ax.axvline(STORAGE, color="gray", alpha=.4, linewidth=1)
     ax.set(xlabel="Atomic storage duration (µs)", ylabel="Six-state mean joint fidelity",
-           title="Memory performance vs storage duration", ylim=(0, 1.02),
+           title="End-to-end fidelity vs storage duration", ylim=(0, 1.02),
            xlim=(data[0, 0], data[-1, 0]))
     ax.legend(fontsize=8, loc="lower left")
     ax.text(.98, .04, "Fixed phase calibration; no postselection\n"
-            "Direct transmon: equal total elapsed time", transform=ax.transAxes,
+            "Direct transmon: equal total elapsed time\n"
+            "Check write populations to confirm atomic storage.", transform=ax.transAxes,
             ha="right", va="bottom", fontsize=7)
     if save:
         output = Path(__file__).with_name("hybrid_storage_fidelity.csv")
