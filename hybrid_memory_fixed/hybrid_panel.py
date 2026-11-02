@@ -49,8 +49,8 @@ def coupling_equations_png(dpi=120):
     figure=Figure(figsize=(5.6,1.25),dpi=dpi)
     FigureCanvasAgg(figure)
     equations=(
-        r"$g_{\mathrm{TC}} = \frac{2e\beta V_{\mathrm{zpf}}}{\hbar}"
-        r"\left|\langle 0|\hat{n}|1\rangle\right|$",
+        r"$g_{\mathrm{TC}} \approx \frac{2e\beta V_{\mathrm{zpf}}}{\hbar}"
+        r"\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
         r"$g_{\mathrm{AC}} = \frac{\left|\mathbf{d}_{01}\cdot"
         r"\mathbf{E}_{\mathrm{zpf}}\right|}{\hbar}"
         r"= \frac{|d_{01}|E_{\mathrm{zpf}}|\cos\theta|}{\hbar}$",
@@ -103,13 +103,13 @@ class ParameterPanel:
                 ttk.Label(frame,image=self.coupling_equations).grid(
                     row=row+1,column=0,columnspan=3,sticky="w",pady=(12,6))
                 ttk.Label(frame,text="Use local vacuum RMS voltage and field amplitudes.\n"
-                                     "Supply the charge matrix element at the operating point. "
+                                     "Charge matrix element is calculated as [E_J(swap)/(32 E_C)]^(1/4). "
                                      "Couplings stay constant during a run.",
                           wraplength=800).grid(row=row+2,column=0,columnspan=3,sticky="w",pady=(0,8))
         ttk.Label(outer,textvariable=self.coupling_summary).pack(anchor="w",pady=(8,0))
         self.update_couplings()
         ttk.Label(outer,text="Couplings are calculated from device and atomic inputs; cavity geometry is not solved.\n"
-                            "Swap flux and voltage are independent inputs; device changes do not retune them.\n"
+                            "Swap flux and voltage are calculated for resonance with the cavity.\n"
                             "Stark coefficients include their sign and the factor -alpha/(2h). Pure dephasing times are not total T2.",
                   wraplength=940).pack(anchor="w",pady=(10,6))
         controls=ttk.Frame(outer)
@@ -147,10 +147,11 @@ class ParameterPanel:
         try:
             d=derived(self.config())
             self.coupling_summary.set(
-                f"Calculated g(TC) / 2π: {d['transmon_coupling_MHz']:.6g} MHz; "
+                f"Calculated |n01|: {d['transmon_charge_matrix_element']:.6g}; "
+                f"g(TC) / 2π: {d['transmon_coupling_MHz']:.6g} MHz; "
                 f"g(AC) / 2π: {d['atom_coupling_MHz']:.6g} MHz\n"
-                f"Swap detuning TC: {d['transmon_swap_detuning_MHz']:.6g} MHz; "
-                f"AC: {d['atom_swap_detuning_MHz']:.6g} MHz")
+                f"Calculated swap flux / flux quantum: {d['swap_flux']:.6g}; "
+                f"swap electrode voltage: {d['resonance_voltage_V']:.6g} V")
         except ValueError:
             self.coupling_summary.set("Calculated couplings unavailable: check parameter values.")
 

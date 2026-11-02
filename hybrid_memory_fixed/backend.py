@@ -32,7 +32,7 @@ if _config_args.config:
     except (OSError, ValueError) as exc:
         _config_parser.error(f"Cannot load config {_config_args.config!r}: {exc}")
 
-from hybrid_settings import validate, coupling_strengths, derived
+from hybrid_settings import validate, coupling_strengths, derived, calculated_flux, calculated_swap_field
 _SETTINGS = validate(_SETTINGS)
 _COUPLINGS = coupling_strengths(_SETTINGS)
 
@@ -60,9 +60,9 @@ K_R1 = parameter("K_R1", -12.0)
 GAP_CM = parameter("GAP_CM", 0.10)
 STRAY_FIELD = parameter("STRAY_FIELD", 0.20)
 E_PARK = parameter("E_PARK", 0.0)
-# Independent applied voltage: device changes must not silently retune it.
-V_SWAP = _SETTINGS["V_SWAP"]
-E_SWAP = V_SWAP / GAP_CM + STRAY_FIELD
+# Calculate the positive-field atom-cavity resonance and compensate stray field.
+E_SWAP = calculated_swap_field(_SETTINGS)
+V_SWAP = GAP_CM * (E_SWAP - STRAY_FIELD)
 
 # Coherence times (us), phenomenological Markovian rates.
 T1_T = parameter("T1_T", 100.0)
@@ -88,16 +88,10 @@ STORAGE = parameter("STORAGE", 5.0)
 MAX_STEP = parameter("MAX_STEP", 0.0005)
 
 def flux_for_frequency(f):
-    # Invert the approximate asymmetric-SQUID transmon formula,
-    # choosing the branch 0 <= Phi/Phi0 <= 1/2.
-    ratio = ((f + EC)**2 / (8 * EC)) / EJ_MAX
-    c2 = (ratio**2 - ASYMMETRY**2) / (1 - ASYMMETRY**2)
-    if not 0 <= c2 <= 1:
-        raise ValueError("Requested transmon frequency is outside tuning range.")
-    return np.arccos(np.sqrt(c2)) / np.pi
+    return calculated_flux(_SETTINGS, f)
 
 PHI_PARK = flux_for_frequency(F_T_PARK)
-PHI_SWAP = _SETTINGS["PHI_SWAP"]
+PHI_SWAP = flux_for_frequency(FC)
 
 def transmon_frequency(phi):
     ej = EJ_MAX * np.sqrt(
