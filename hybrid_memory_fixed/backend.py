@@ -271,13 +271,13 @@ def overlap(rho_a, target, U):
         qt.ket2dm(target), U * rho_a * U.dag()
     )))
 
-def results_table(ax, headers, rows, widths=None):
+def results_table(ax, headers, rows, widths=None, bbox=(0, 0.20, 1, 0.58), fontsize=11):
     """Render a shared numeric summary without plot axes."""
     ax.set_axis_off()
     table = ax.table(cellText=rows, colLabels=headers, colWidths=widths,
-                     cellLoc="center", bbox=(0, 0.20, 1, 0.58))
+                     cellLoc="center", bbox=bbox)
     table.auto_set_font_size(False)
-    table.set_fontsize(11)
+    table.set_fontsize(fontsize)
     for (row, col), cell in table.get_celld().items():
         cell.set_edgecolor("#d0d5dc")
         if row == 0:
@@ -462,14 +462,42 @@ def main(check=False, save=False):
         population_axis.plot(ts[transfer], line[transfer], label=label)
     population_axis.set(ylabel="Population / photon number", title="Write transfer dynamics")
     population_axis.legend(fontsize=8, ncol=2)
-    plot_transfer_fidelity(performance_axis, "write", save=save)
     labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase)
+    performance_axis.set_axis_off()
+    performance_axis.set_title("Write transfer summary")
+    summary_rows = [
+        ["Total write time (preparation through mapping)", f"{MAP[1] * 1000:.2f} ns"],
+        ["Transmon–cavity hold (excluding ramps)", f"{np.pi / (2 * G_TC) * 1000:.2f} ns"],
+        ["Cavity–atom hold (excluding ramps)", f"{np.pi / (2 * G_AC) * 1000:.2f} ns"],
+        ["Joint fidelity: g → h0", f"{input_fidelities[0]:.2%}"],
+        ["Joint fidelity: e → h1", f"{input_fidelities[1]:.2%}"],
+        ["Joint fidelity: + → +", f"{input_fidelities[2]:.2%}"],
+        ["Selected input: joint fidelity", f"{fidelity[-1]:.2%}"],
+        ["Selected input: atomic coherence 2|ρ(h0,h1)|", f"{coherence[-1]:.6f}"],
+        ["Selected input: residual transmon e", f"{pops[0, -1]:.3e}"],
+        ["Selected input: residual mean cavity photons", f"{pops[1, -1]:.3e}"],
+        ["Selected input: residual r0 + r1 population", f"{pops[4, -1] + pops[5, -1]:.3e}"],
+        ["Selected input: atomic loss population", f"{pops[6, -1]:.3e}"],
+        ["Selected input: wrong-Rydberg population", f"{pops[7, -1]:.3e}"],
+    ]
+    table = results_table(performance_axis, ["Metric", "Value"],
+                          summary_rows, widths=[.74, .26],
+                          bbox=(0, 0.04, 1, 0.94), fontsize=8)
+    for row in range(1, len(summary_rows) + 1):
+        table[row, 0].set_text_props(ha="left")
+    if save:
+        # Retain the optional time-resolved CSV even though the figure now
+        # displays final performance rather than final-target overlap traces.
+        data = transfer_fidelity_data("write")
+        csv_output = Path(__file__).with_name("hybrid_transfer_write_fidelity.csv")
+        np.savetxt(csv_output, data, delimiter=",", comments="",
+                   header="transfer_time_us,ground_joint_fidelity,excited_joint_fidelity,plus_joint_fidelity")
+        print(f"Saved {csv_output}", flush=True)
     plot_basis_columns(basis_axis, labels, probabilities, "Write inputs (end of mapping)")
-    fig.supxlabel(f"Selected input at end of transfer: "
-                  f"joint fidelity = {fidelity[-1]:.6f}; "
-                  f"coherence = {coherence[-1]:.6f}.\n"
-                  f"Phase-corrected joint fidelities: g={input_fidelities[0]:.4f}, "
-                  f"e={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.\n"
+    basis_axis.set_box_aspect((4, 4, 3), zoom=.98)
+    basis_axis.xaxis.labelpad = -5
+    fig.supxlabel(f"Selected input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°. "
+                  "Selected-input metrics are evaluated at the end of mapping.\n"
                   "+ = equal coherent superposition; fixed phase correction; no postselection.\n"
                   "Target: transmon g, cavity vacuum, atomic input encoded in h0/h1.",
                   fontsize=9)
@@ -993,28 +1021,61 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     detuning_axis.legend(fontsize=8)
     if roundtrip:
         plot_storage_fidelity(performance_axis, save=save)
-    else:
-        plot_transfer_fidelity(performance_axis, "read", source, save=save)
     labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
+    if not roundtrip:
+        pair = ("h0", "h1") if source == "hyperfine" else ("r0", "r1")
+        final_populations = [float(np.real(qt.expect(op, rho_final)))
+                             for op in (n, Ph0, Pr0 + Pr1, Plost, Pwrong)]
+        summary_rows = [
+            ["Total read time (including optical operations)", f"{ts[-1] * 1000:.2f} ns"],
+            ["Atom–cavity hold (excluding ramps)", f"{np.pi / (2 * G_AC) * 1000:.2f} ns"],
+            ["Cavity–transmon hold (excluding ramps)", f"{np.pi / (2 * G_TC) * 1000:.2f} ns"],
+            [f"Joint fidelity: {pair[0]} → g", f"{input_fidelities[0]:.2%}"],
+            [f"Joint fidelity: {pair[1]} → e", f"{input_fidelities[1]:.2%}"],
+            ["Joint fidelity: + → +", f"{input_fidelities[2]:.2%}"],
+            ["Selected input: joint fidelity", f"{joint[-1]:.2%}"],
+            ["Selected input: transmon coherence 2|ρ(g,e)|", f"{coherence[-1]:.6f}"],
+            ["Selected input: residual mean cavity photons", f"{final_populations[0]:.3e}"],
+            ["Selected input: atom reset h0 population", f"{final_populations[1]:.6f}"],
+            ["Selected input: residual r0 + r1 population", f"{final_populations[2]:.3e}"],
+            ["Selected input: atomic loss population", f"{final_populations[3]:.3e}"],
+            ["Selected input: wrong-Rydberg population", f"{final_populations[4]:.3e}"],
+        ]
+        performance_axis.set_title("Read transfer summary")
+        table = results_table(performance_axis, ["Metric", "Value"], summary_rows,
+                              widths=[.74, .26], bbox=(0, 0.04, 1, 0.94), fontsize=8)
+        for row in range(1, len(summary_rows) + 1):
+            table[row, 0].set_text_props(ha="left")
+        if save:
+            data = transfer_fidelity_data("read", source)
+            csv_output = Path(__file__).with_name("hybrid_transfer_read_fidelity.csv")
+            np.savetxt(csv_output, data, delimiter=",", comments="",
+                       header="transfer_time_us,ground_joint_fidelity,excited_joint_fidelity,plus_joint_fidelity")
+            print(f"Saved {csv_output}", flush=True)
     for index, (label, _, _, _, _) in enumerate(cases):
         basis_axis = fig.add_subplot(grid[2, index + 1], projection="3d")
         selection = slice(3 * index, 3 * index + 3)
         title = "Transmon return after write/store" if roundtrip else "Retrieval: " + source
         plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title,
                            mode="read", input_label="Original transmon input" if roundtrip else None)
+        if not roundtrip:
+            basis_axis.set_box_aspect((4, 4, 3), zoom=.98)
+            basis_axis.xaxis.labelpad = -5
     summary_lines = [f"{label}: selected-input overlap = {case_corrected[-1]:.6f}; "
                      f"joint overlap = {case_joint[-1]:.6f}"
                      for label, _, _, case_corrected, case_joint in cases]
     if roundtrip:
         summary_lines.insert(0, f"Atomic storage BEFORE retrieval: selected-input joint fidelity = {atomic_joint:.6f}.")
     else:
-        summary_lines = [f"Independently prepared atomic input: selected-input joint transfer fidelity = {joint[-1]:.6f}."]
+        summary_lines = [f"Independent atomic input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°. "
+                         "Selected-input metrics are evaluated at the end of retrieval."]
     summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
-    metric_label = "Round-trip return fidelities" if roundtrip else "Retrieval joint fidelities"
-    summary_lines.append(f"{metric_label}: input 0={input_fidelities[0]:.4f}, "
-                         f"input 1={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.")
     if roundtrip:
+        summary_lines.append(f"Round-trip return fidelities: input 0={input_fidelities[0]:.4f}, "
+                             f"input 1={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.")
         summary_lines.append("Return fidelity includes states that remained in the transmon; see atomic storage curves for transfer.")
+    else:
+        summary_lines[-1] += " No postselection."
     summary_lines.append("+ = equal coherent superposition; olive: intended logical outputs; Other: remaining joint states.")
     fig.supxlabel("\n".join(summary_lines), fontsize=9)
     population_axes = []

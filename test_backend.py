@@ -77,6 +77,42 @@ class HamiltonianTests(unittest.TestCase):
                                    np.sin(np.linspace(0, np.pi, 101) / 2) ** 2,
                                    atol=1e-7)
 
+    def test_transmon_drives_select_levels_and_preserve_spectators(self):
+        f01 = lambda t: (0.7 + 0.2j) * np.exp(-2j * t)
+        f12 = lambda t: (0.3 - 0.4j) * np.exp(-3j * t)
+        H = build_hamiltonian(
+            [2, 3], [0, 0], [0, 2, 5], [0, 0, 0, 0],
+            np.zeros((2, 2)), transmon_drives=[(0, 1, f01), (1, 2, f12)],
+        )
+        for t in (0, 0.27, 1.1):
+            matrix = H(t)
+            self.assertTrue(matrix.isherm)
+            for lo, hi, f in ((0, 1, f01), (1, 2, f12)):
+                initial = state([1, 2], lo, ATOM_B, (2, 3), nt=3)
+                target = state([1, 2], hi, ATOM_B, (2, 3), nt=3)
+                self.assertAlmostEqual(matrix.matrix_element(target.dag(), initial), f(t))
+                self.assertAlmostEqual(matrix.matrix_element(initial.dag(), target), f(t).conjugate())
+                for wrong in (
+                    state([0, 2], hi, ATOM_B, (2, 3), nt=3),
+                    state([1, 1], hi, ATOM_B, (2, 3), nt=3),
+                    state([1, 2], hi, ATOM_R, (2, 3), nt=3),
+                ):
+                    self.assertAlmostEqual(matrix.matrix_element(wrong.dag(), initial), 0)
+
+    def test_transmon_microwave_pi_pulse(self):
+        omega_d, Omega = 2.0, 0.8
+        H = build_hamiltonian(
+            [2], [0], [0, omega_d], [0, 0, 0, 0], [[0]],
+            transmon_drives=[(0, 1, lambda t: Omega / 2 * np.exp(-1j * omega_d * t))],
+        )
+        initial = state([0], 0, ATOM_A)
+        target = state([0], 1, ATOM_A)
+        times = np.linspace(0, np.pi / Omega, 101)
+        result = qt.sesolve(H, initial, times, e_ops=[target.proj()],
+                            options={"atol": 1e-10, "rtol": 1e-10})
+        np.testing.assert_allclose(result.expect[0], np.sin(Omega * times / 2) ** 2,
+                                   atol=1e-7)
+
     def test_invalid_parameters_are_rejected(self):
         defaults = dict(cutoffs=[2], wc=[5], wt=[0, 11],
                         wa=[0, 2, 17, 19], gt=[[0]])
@@ -84,11 +120,17 @@ class HamiltonianTests(unittest.TestCase):
             {"cutoffs": [2.5]}, {"wa": [0, 1, 2]}, {"wt": [0, 1j]},
             {"gt": [[np.nan]]}, {"cavity_drives": [(-1, lambda t: 1)]},
             {"laser_drives": [(1, 4, lambda t: 1)]},
+            {"transmon_drives": [(0, 2, lambda t: 1)]},
+            {"transmon_drives": [(-1, 1, lambda t: 1)]},
+            {"transmon_drives": [(0, 0, lambda t: 1)]},
             {"atom_couplings": [(0, 3, 2, 1)]},
         ]
         for replacement in invalid:
             with self.subTest(replacement=replacement), self.assertRaises(ValueError):
                 build_hamiltonian(**(defaults | replacement))
+
+        with self.assertRaises(TypeError):
+            build_hamiltonian(**defaults, transmon_drives=[(0, 1, 0.5)])
 
 
 if __name__ == "__main__":
