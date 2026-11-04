@@ -3,19 +3,33 @@ Start the parameter panel: python backend.py
 Direct plots without the panel: python backend.py --run
 
 The default output is two independent state-transfer windows:
-transmon to atom and atom to transmon. Each fidelity panel shows three
-time traces, with final values in the legend: logical ground, excited, and
-the coherent equal superposition +. All curves include configured noise.
+transmon to atom and atom to transmon. The write figure summarizes total write
+time, nominal swap holds (excluding ramps), final joint fidelities for g/e/+,
+and selected-input coherence and residual populations in a table. The selected
+input is identified by its Bloch angles below the figure. The read figure has
+a matching table of storage hold, readout and combined duration, nominal swap holds, final joint fidelities for
+the two logical basis inputs and +, selected-input transmon coherence, cavity
+photons, atom reset h0 population, and residual atomic populations. Metrics include
+configured noise; fidelity uses a fixed phase correction without postselection.
 For writing, the input is (alpha|g> + beta|e>) tensor |0,h0>, and the
 target is |g,0> tensor (alpha|h0> + beta|h1>).
 For reading, the input is |g,0> tensor (alpha|h0> + beta|h1>), prepared
-independently of writing. The target is (alpha|g> + beta|e>) tensor |0,h0>.
+independently of writing, then evolved at the parked operating point for
+STORAGE before retrieval. The target is (alpha|g> + beta|e>) tensor |0,h0>.
+All read fidelities, output columns, residual populations and CSV traces include
+this hold, without resetting or renormalizing the stored state. The plotted
+retrieval time starts at zero AFTER the hold. Noiseless phase calibration
+includes the same hold and is shared across inputs. Set STORAGE=0 for readout only.
 Fidelity is <target|rho|target>, including the required empty source and
 cavity vacuum. Residual excitation, loss and decoherence count as errors.
 The + target tests coherence as well as population. A single noiseless phase
 calibration for each direction is shared across its three input states.
 No conditioning on successful transfer or postselection is applied.
-The default figures measure transfer only; STORAGE does not add a hold.
+The write summary and output columns include writing followed by STORAGE.
+It separately reports the selected input's fidelity immediately after writing
+and after storage. The write dynamics plot still shows only the short transfer
+sequence. All other write-table state metrics are evaluated after storage.
+The read figure measures storage plus readout from an independently prepared atom.
 With --save, hybrid_transfer_write_fidelity.csv and
 hybrid_transfer_read_fidelity.csv contain time and the three fidelities.
 
@@ -33,10 +47,10 @@ equal superposition "+". Olive columns show intended logical outputs; gold
 columns show other outputs. "Other" includes wrong Rydberg, residual excitation,
 and loss. Phase-corrected joint fidelities for all three inputs are printed
 below each figure; populations alone do not establish superposition fidelity.
-Write columns are evaluated at the end of mapping. Round-trip columns use
+Write columns are evaluated after mapping and the STORAGE hold. Round-trip columns use
 the complete state after writing and storage, and are labeled by the ORIGINAL
 TRANSMON input (g/e/+), not an independently prepared memory input.
-Retrieval-only columns use an independently prepared atomic input. The selected
+Read columns use an independently prepared atomic input after the STORAGE hold. The selected
 superposition's phase-corrected overlap is reported below each figure.
 
 Requires a Python installation with Tk, plus:

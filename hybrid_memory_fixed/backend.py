@@ -288,7 +288,7 @@ def results_table(ax, headers, rows, widths=None, bbox=(0, 0.20, 1, 0.58), fonts
     return table
 
 
-def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None):
+def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None, storage=False):
     """Exclusive joint outcomes and coherent fidelity for g/e/+ inputs.
 
     Columns are probabilities of orthogonal joint basis outputs. The separate
@@ -315,13 +315,15 @@ def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None):
                     _, write_states = simulate(alpha, beta, include_storage=True)
                     initial = write_states[-1]
                 else:
-                    initial = retrieval_initial(alpha, beta, source)
+                    initial = stored_retrieval_initial(alpha, beta, source)
                 _, states, _, _, _ = evolve_read(initial, source=source)
                 label = (("h0 → g", "h1 → e", "+ → +") if source == "hyperfine" else
                          ("r0 → g", "r1 → e", "+ → +"))[index]
                 if roundtrip:
                     label = ("g → g", "e → e", "+ → +")[index] + "\nAfter write/store"
             final = states[-1]
+            if mode == "write" and storage:
+                final = hold_memory(final)
             probs = [float(np.real(qt.expect(qt.ket2dm(k), final))) for k in outputs]
             wrong = float(np.real(qt.expect(Pwrong, final)))
             row = [*probs, wrong, 1-sum(probs)-wrong]
@@ -462,27 +464,36 @@ def main(check=False, save=False):
         population_axis.plot(ts[transfer], line[transfer], label=label)
     population_axis.set(ylabel="Population / photon number", title="Write transfer dynamics")
     population_axis.legend(fontsize=8, ncol=2)
-    labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase)
+    held_state = hold_memory(states[-1])
+    held_fidelity = float(np.real(qt.expect(atomic_storage_effect(transfer_target, phase), held_state)))
+    held_coherence = 2 * abs(held_state.ptrace(2)[0, 1])
+    held_pops = np.real([qt.expect(op, held_state)
+                         for op in (Pe, n, Ph0, Ph1, Pr0, Pr1, Plost, Pwrong)])
+    labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase, storage=True)
+    print(f"Joint fidelity AFTER {STORAGE:g} us storage: {held_fidelity:.6f}")
     performance_axis.set_axis_off()
-    performance_axis.set_title("Write transfer summary")
+    performance_axis.set_title("Write + storage summary")
     summary_rows = [
         ["Total write time (preparation through mapping)", f"{MAP[1] * 1000:.2f} ns"],
+        ["Storage hold after writing", f"{STORAGE:g} µs"],
+        ["Total write + storage duration", f"{MAP[1] + STORAGE:.6g} µs"],
         ["Transmon–cavity hold (excluding ramps)", f"{np.pi / (2 * G_TC) * 1000:.2f} ns"],
         ["Cavity–atom hold (excluding ramps)", f"{np.pi / (2 * G_AC) * 1000:.2f} ns"],
         ["Joint fidelity: g → h0", f"{input_fidelities[0]:.2%}"],
         ["Joint fidelity: e → h1", f"{input_fidelities[1]:.2%}"],
         ["Joint fidelity: + → +", f"{input_fidelities[2]:.2%}"],
-        ["Selected input: joint fidelity", f"{fidelity[-1]:.2%}"],
-        ["Selected input: atomic coherence 2|ρ(h0,h1)|", f"{coherence[-1]:.6f}"],
-        ["Selected input: residual transmon e", f"{pops[0, -1]:.3e}"],
-        ["Selected input: residual mean cavity photons", f"{pops[1, -1]:.3e}"],
-        ["Selected input: residual r0 + r1 population", f"{pops[4, -1] + pops[5, -1]:.3e}"],
-        ["Selected input: atomic loss population", f"{pops[6, -1]:.3e}"],
-        ["Selected input: wrong-Rydberg population", f"{pops[7, -1]:.3e}"],
+        ["Selected input: fidelity before storage", f"{fidelity[-1]:.2%}"],
+        ["Selected input: fidelity after storage", f"{held_fidelity:.2%}"],
+        ["Selected input: atomic coherence 2|ρ(h0,h1)|", f"{held_coherence:.6f}"],
+        ["Selected input: residual transmon e", f"{held_pops[0]:.3e}"],
+        ["Selected input: residual mean cavity photons", f"{held_pops[1]:.3e}"],
+        ["Selected input: residual r0 + r1 population", f"{held_pops[4] + held_pops[5]:.3e}"],
+        ["Selected input: atomic loss population", f"{held_pops[6]:.3e}"],
+        ["Selected input: wrong-Rydberg population", f"{held_pops[7]:.3e}"],
     ]
     table = results_table(performance_axis, ["Metric", "Value"],
                           summary_rows, widths=[.74, .26],
-                          bbox=(0, 0.04, 1, 0.94), fontsize=8)
+                          bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
     for row in range(1, len(summary_rows) + 1):
         table[row, 0].set_text_props(ha="left")
     if save:
@@ -493,11 +504,11 @@ def main(check=False, save=False):
         np.savetxt(csv_output, data, delimiter=",", comments="",
                    header="transfer_time_us,ground_joint_fidelity,excited_joint_fidelity,plus_joint_fidelity")
         print(f"Saved {csv_output}", flush=True)
-    plot_basis_columns(basis_axis, labels, probabilities, "Write inputs (end of mapping)")
+    plot_basis_columns(basis_axis, labels, probabilities, "Write outputs after storage")
     basis_axis.set_box_aspect((4, 4, 3), zoom=.98)
     basis_axis.xaxis.labelpad = -5
     fig.supxlabel(f"Selected input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°. "
-                  "Selected-input metrics are evaluated at the end of mapping.\n"
+                  f"Table and bars include {STORAGE:g} µs storage, except the explicitly labeled pre-storage fidelity.\n"
                   "+ = equal coherent superposition; fixed phase correction; no postselection.\n"
                   "Target: transmon g, cavity vacuum, atomic input encoded in h0/h1.",
                   fontsize=9)
@@ -716,6 +727,30 @@ def retrieval_initial(alpha, beta, source="hyperfine"):
     return qt.tensor(g, qt.basis(NC, 0), atom)
 
 
+@lru_cache(maxsize=1)
+def parked_storage_solver():
+    """Reuse the constant parked Lindblad generator for independent inputs."""
+    return qt.MESolver(H(MAP[1]), C_OPS, options={
+        "method": "diag", "normalize_output": False,
+    })
+
+
+def hold_memory(initial, noisy=True):
+    """Evolve the complete joint state at park for STORAGE, without resetting it."""
+    if STORAGE == 0:
+        return initial
+    if not noisy:
+        unitary = (-1j * H(MAP[1]) * STORAGE).expm()
+        return unitary * initial if initial.isket else unitary * initial * unitary.dag()
+    rho = initial.proj() if initial.isket else initial
+    return parked_storage_solver().run(rho, [0, STORAGE]).states[-1]
+
+
+def stored_retrieval_initial(alpha, beta, source="hyperfine", noisy=True):
+    """Prepare an atomic input and retain its full state after the storage hold."""
+    return hold_memory(retrieval_initial(alpha, beta, source), noisy=noisy)
+
+
 def read_phase(source="hyperfine", roundtrip=False):
     # Fixed calibration from a nominal |+> input; never fit to noisy data
     # or separately to each unknown input state.
@@ -723,7 +758,7 @@ def read_phase(source="hyperfine", roundtrip=False):
         _, write_states = simulate(1, 1, noisy=False, include_storage=True)
         initial = write_states[-1]
     else:
-        initial = retrieval_initial(1, 1, source)
+        initial = stored_retrieval_initial(1, 1, source, noisy=False)
     _, states, _, _, _ = evolve_read(initial, noisy=False, source=source)
     return float(np.angle(states[-1].ptrace(0)[0, 1]))
 
@@ -803,7 +838,8 @@ def transfer_fidelity_data(mode, source="hyperfine"):
     """Time, then unconditional joint fidelities for logical 0, 1 and +.
 
     Each direction starts with an independently prepared source qubit and
-    an empty destination. One noiseless phase calibration serves all inputs.
+    an empty destination. Read inputs undergo STORAGE before readout.
+    One noiseless phase calibration serves all inputs.
     The + projector includes coherence, unlike a population-only score.
     """
     if mode not in ("write", "read"):
@@ -816,7 +852,7 @@ def transfer_fidelity_data(mode, source="hyperfine"):
             times, states = simulate(alpha, beta, include_storage=False)
             values = np.real(qt.expect(atomic_storage_effect(target, phase), states))
         else:
-            initial = retrieval_initial(alpha, beta, source)
+            initial = stored_retrieval_initial(alpha, beta, source)
             times, states, _, _, _ = evolve_read(initial, source=source)
             values = read_metrics(states, target, phase)[2]
         curves.append(values)
@@ -945,7 +981,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         atomic_joint = float(np.real(qt.expect(
             atomic_storage_effect(target, calibrated_phase()), initial)))
     else:
-        initial = retrieval_initial(alpha, beta, source)
+        initial = stored_retrieval_initial(alpha, beta, source)
     ts, states, stages, flux_read, voltage_read = evolve_read(initial, source=source)
     raw, corrected, joint, coherence = read_metrics(states, target, phase)
 
@@ -958,6 +994,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     assert -1e-6 <= corrected[-1] <= 1 + 1e-6
 
     print("Mode:", "write-store-read round trip" if roundtrip else f"{source} to transmon")
+    print(f"Storage hold before retrieval: {STORAGE:g} us")
     if roundtrip:
         print(f"Atomic storage joint fidelity BEFORE retrieval: {atomic_joint:.6f}")
         print("Transmon return overlaps below include excitation that never entered the memory.")
@@ -971,7 +1008,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
 
     if check:
         # Test a distinct relative phase with the SAME calibration.
-        initial_test = retrieval_initial(1, 1j, source)
+        initial_test = stored_retrieval_initial(1, 1j, source, noisy=False)
         _, test_states, _, _, _ = evolve_read(initial_test, noisy=False, source=source)
         _, refined_states, _, _, _ = evolve_read(
             initial_test, noisy=False, source=source, step=MAX_STEP / 2
@@ -989,7 +1026,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
 
     # The round trip uses only the complete state after writing and storage.
     cases = [("After writing and storage" if roundtrip else
-              "Independently prepared atomic input", ts, states, corrected, joint)]
+              f"Atomic input after {STORAGE:g} µs storage", ts, states, corrected, joint)]
     fig = plt.figure(figsize=(12, 10), layout="constrained")
     grid = fig.add_gridspec(3, 2)
     flux_axis = fig.add_subplot(grid[0, 0])
@@ -1027,7 +1064,9 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         final_populations = [float(np.real(qt.expect(op, rho_final)))
                              for op in (n, Ph0, Pr0 + Pr1, Plost, Pwrong)]
         summary_rows = [
-            ["Total read time (including optical operations)", f"{ts[-1] * 1000:.2f} ns"],
+            ["Storage hold before readout", f"{STORAGE:g} µs"],
+            ["Readout duration (including optical operations)", f"{ts[-1] * 1000:.2f} ns"],
+            ["Total storage + readout duration", f"{STORAGE + ts[-1]:.6g} µs"],
             ["Atom–cavity hold (excluding ramps)", f"{np.pi / (2 * G_AC) * 1000:.2f} ns"],
             ["Cavity–transmon hold (excluding ramps)", f"{np.pi / (2 * G_TC) * 1000:.2f} ns"],
             [f"Joint fidelity: {pair[0]} → g", f"{input_fidelities[0]:.2%}"],
@@ -1041,9 +1080,9 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             ["Selected input: atomic loss population", f"{final_populations[3]:.3e}"],
             ["Selected input: wrong-Rydberg population", f"{final_populations[4]:.3e}"],
         ]
-        performance_axis.set_title("Read transfer summary")
+        performance_axis.set_title("Storage + readout summary")
         table = results_table(performance_axis, ["Metric", "Value"], summary_rows,
-                              widths=[.74, .26], bbox=(0, 0.04, 1, 0.94), fontsize=8)
+                              widths=[.74, .26], bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
         for row in range(1, len(summary_rows) + 1):
             table[row, 0].set_text_props(ha="left")
         if save:
@@ -1055,7 +1094,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     for index, (label, _, _, _, _) in enumerate(cases):
         basis_axis = fig.add_subplot(grid[2, index + 1], projection="3d")
         selection = slice(3 * index, 3 * index + 3)
-        title = "Transmon return after write/store" if roundtrip else "Retrieval: " + source
+        title = "Transmon return after write/store" if roundtrip else "After storage + retrieval: " + source
         plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title,
                            mode="read", input_label="Original transmon input" if roundtrip else None)
         if not roundtrip:
@@ -1067,8 +1106,8 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     if roundtrip:
         summary_lines.insert(0, f"Atomic storage BEFORE retrieval: selected-input joint fidelity = {atomic_joint:.6f}.")
     else:
-        summary_lines = [f"Independent atomic input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°. "
-                         "Selected-input metrics are evaluated at the end of retrieval."]
+        summary_lines = [f"Atomic input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°. "
+                         f"All read metrics include {STORAGE:g} µs storage followed by retrieval."]
     summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
     if roundtrip:
         summary_lines.append(f"Round-trip return fidelities: input 0={input_fidelities[0]:.4f}, "
@@ -1100,7 +1139,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             ax.axvline(start, color="gray", alpha=0.15)
             ax.axvline(end, color="gray", alpha=0.15)
     title = "Write–store–read: transmon return" if roundtrip else "Atom to transmon"
-    subtitle = "After writing and storage" if roundtrip else f"Retrieval from {source} memory"
+    subtitle = "After writing and storage" if roundtrip else f"Retrieval from {source} memory after {STORAGE:g} µs storage"
     fig.suptitle(title + "\n" + subtitle)
     fig.canvas.manager.set_window_title(title)
     stem = "hybrid_roundtrip" if roundtrip else f"hybrid_retrieval_{source}"
@@ -1457,7 +1496,7 @@ if __name__ == "__main__":
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--leakage-scan", action="store_true")
     parser.add_argument("--retrieve", action="store_true",
-                        help="Transfer a prepared atomic qubit to the transmon.")
+                        help="Store a prepared atomic qubit for STORAGE, then transfer it to the transmon.")
     parser.add_argument("--roundtrip", action="store_true",
                         help="Write, store, then retrieve the same joint state.")
     parser.add_argument("--source", choices=("hyperfine", "rydberg"), default="hyperfine")
