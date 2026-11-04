@@ -129,9 +129,9 @@ SECTION_EQUATIONS = {
             r"$f_{\mathrm{swap},TC}=2g_{TC}/(2\pi),\qquad f_{\mathrm{swap},AC}=2g_{AC}/(2\pi),\qquad t_{\mathrm{hold}}=1/(2f_{\mathrm{swap}})$",
             r"$\beta=\frac{C_g}{C_\Sigma},\qquad n_{01}\approx\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
         ),
-        "Use local vacuum RMS voltage and field amplitudes. C_g is the coupling capacitance; "
+        "C_g is the coupling capacitance; "
         "C_Σ is total transmon capacitance. The charge matrix element is calculated at the swap point. "
-        "Couplings stay constant during a run. Swap frequencies shown are nominal resonant population oscillation rates; detuning reduces transfer.",
+        "Swap frequencies shown are nominal resonant population oscillation rates; detuning reduces transfer.",
     ),
     "Atom and electrodes": (
         (
@@ -141,9 +141,7 @@ SECTION_EQUATIONS = {
             r"$\Delta_{w,r0}(E)=2\pi[f_{\mathrm{wrong,split}}+(K_w-K_{r0})E^2],\qquad \Omega_w(t)=\eta\,\Omega(t)$",
         ),
         "ℓ is electrode separation in cm; E is in V/cm and K is in MHz/(V/cm)². "
-        "Stark coefficients include their sign and −α/(2h). "
-        "η is relative unwanted optical amplitude. The applied swap voltage is independent of f_c. "
-        "Changing the cavity frequency does not retune the voltage.",
+        "η is relative unwanted optical amplitude.",
     ),
     "Loss and coherence": (
         (
@@ -153,7 +151,7 @@ SECTION_EQUATIONS = {
             r"$\frac{1}{T_{2,T}}=\frac{1}{2T_{1,T}}+\frac{1}{T_{\phi,T}},\qquad Q_c=2\pi f_cT_{1,c}$",
         ),
         "All lifetimes are in μs; T_phi denotes pure dephasing, not total T2. "
-        "Rydberg decay includes r0, r1, and the unwanted level. P_s = |s⟩⟨s|. "
+        "Rydberg decay includes r0, r1, and the unwanted level. "
         "The T2 relation shown is for the transmon; cavity T1 is photon-number lifetime.",
     ),
     "Pulses and input state": (
@@ -163,7 +161,7 @@ SECTION_EQUATIONS = {
             r"$w_{\mathrm{rise}}(u)=\frac{1-\cos(\pi u/T_{\mathrm{ramp}})}{2},\qquad 0\leq u\leq T_{\mathrm{ramp}}$",
             r"$|\psi_T\rangle=\cos(\vartheta/2)|g\rangle+e^{i\varphi}\sin(\vartheta/2)|e\rangle,\qquad t_{\mathrm{end}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
         ),
-        "The OMEGA input is Ω_max / (2π) in MHz; times are in μs. Optical envelopes vanish outside "
+        "Times are in μs. Optical envelopes vanish outside "
         "their pulse intervals. Ramps use a raised cosine, a flat hold, and a reversed falling ramp. "
         "GAP separates operations. Input Bloch angles are entered in degrees. "
         "Swap holds are nominal isolated, resonant values.",
@@ -174,10 +172,7 @@ SECTION_EQUATIONS = {
             r"$i\,\frac{d|\psi\rangle}{dt}=H|\psi\rangle\quad\mathrm{(noiseless)},\qquad \Delta t_{\mathrm{internal}}\leq\Delta t_{\max}=\mathrm{MAX\_STEP}$",
             r"$D=2\,N_c\,6=12N_c,\qquad n_{\mathrm{cavity}}\in\{0,\ldots,N_c-1\},\qquad N_c\geq3$",
         ),
-        "H is expressed in angular-frequency units (rad/μs). MAX_STEP limits internal integration steps, "
-        "not plot sampling. The transfer solver uses DOP853, absolute tolerance 10⁻¹¹ and relative "
-        "tolerance 10⁻⁹. N_c is the cavity truncation; transmon and atom use 2 and 6 states. "
-        "Check convergence by reducing MAX_STEP and increasing N_c.",
+        "",
     ),
 }
 
@@ -328,9 +323,7 @@ class ParameterPanel:
             f"Nominal resonant swap frequencies: TC {d['transmon_swap_frequency_MHz']:.5g} MHz; "
             f"AC {d['atom_swap_frequency_MHz']:.5g} MHz.\n"
             f"Nominal resonant holds: TC {d['transmon_swap_hold_us']:.5g} us; "
-            f"AC {d['atom_swap_hold_us']:.5g} us.\n"
-            f"Plateau detuning TC/AC: {d['transmon_swap_detuning_MHz']:.5g} / "
-            f"{d['atom_swap_detuning_MHz']:.5g} MHz.")
+            f"AC {d['atom_swap_hold_us']:.5g} us.")
 
     def config(self):
         return validate({key:value.get() for key,value in self.entries.items()})

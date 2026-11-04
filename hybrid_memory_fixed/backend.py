@@ -507,10 +507,9 @@ def main(check=False, save=False):
     plot_basis_columns(basis_axis, labels, probabilities, "Write outputs after storage")
     basis_axis.set_box_aspect((4, 4, 3), zoom=.98)
     basis_axis.xaxis.labelpad = -5
-    fig.supxlabel(f"Selected input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°. "
-                  f"Table and bars include {STORAGE:g} µs storage, except the explicitly labeled pre-storage fidelity.\n"
-                  "+ = equal coherent superposition; fixed phase correction; no postselection.\n"
-                  "Target: transmon g, cavity vacuum, atomic input encoded in h0/h1.",
+    fig.supxlabel(f"Selected input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°.\n"
+                  f"Initial transmon populations: g = {100 * np.cos(theta / 2)**2:.2f}%, "
+                  f"e = {100 * np.sin(theta / 2)**2:.2f}%.",
                   fontsize=9)
     for ax in (control_axis, detuning_axis, population_axis):
         ax.set_xlabel("Time (us)")
@@ -1105,17 +1104,18 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
                      for label, _, _, case_corrected, case_joint in cases]
     if roundtrip:
         summary_lines.insert(0, f"Atomic storage BEFORE retrieval: selected-input joint fidelity = {atomic_joint:.6f}.")
-    else:
-        summary_lines = [f"Atomic input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°. "
-                         f"All read metrics include {STORAGE:g} µs storage followed by retrieval."]
-    summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
-    if roundtrip:
+        summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
         summary_lines.append(f"Round-trip return fidelities: input 0={input_fidelities[0]:.4f}, "
                              f"input 1={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.")
         summary_lines.append("Return fidelity includes states that remained in the transmon; see atomic storage curves for transfer.")
+        summary_lines.append("+ = equal coherent superposition; olive: intended logical outputs; Other: remaining joint states.")
     else:
-        summary_lines[-1] += " No postselection."
-    summary_lines.append("+ = equal coherent superposition; olive: intended logical outputs; Other: remaining joint states.")
+        lower, upper = ("h0", "h1") if source == "hyperfine" else ("r0", "r1")
+        summary_lines = [
+            f"Atomic input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°.",
+            f"Initial atomic populations (before storage): {lower} = {100 * abs(alpha)**2:.2f}%, "
+            f"{upper} = {100 * abs(beta)**2:.2f}%.",
+        ]
     fig.supxlabel("\n".join(summary_lines), fontsize=9)
     population_axes = []
     time_axes = [flux_axis, detuning_axis]
