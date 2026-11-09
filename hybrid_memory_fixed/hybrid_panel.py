@@ -32,7 +32,9 @@ configure_tk_libraries()
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter.scrolledtext import ScrolledText
 from hybrid_settings import FIELDS, DEFAULTS, validate, derived
+from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
 ("Both transfer directions", []),
@@ -219,6 +221,9 @@ class ParameterPanel:
         self.process=None
         self.events=queue.Queue()
         self.temp_path=None
+        self.last_run=None
+        self.assistant_request=0
+        self.assistant_cancel=threading.Event()
         root.title("Hybrid quantum memory — simulation parameters")
         width=min(1800,int(root.winfo_screenwidth()*.96))
         height=min(1100,int(root.winfo_screenheight()*.90))
@@ -277,6 +282,7 @@ class ParameterPanel:
             note.grid(row=1,column=0,sticky="ew")
             equations.bind("<Configure>",lambda event,label=note:
                            label.configure(wraplength=max(200,event.width-24)))
+        self.build_assistant_tab()
         controls=ttk.Frame(outer)
         controls.pack(fill="x")
         ttk.Label(controls,text="Output:").pack(side="left")
@@ -304,6 +310,90 @@ class ParameterPanel:
         self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.root.after(100,self.poll)
+
+    def build_assistant_tab(self):
+        tab=ttk.Frame(self.tabs,padding=12)
+        self.tabs.add(tab,text="Assistant")
+        ttk.Label(tab,text="Ask about your settings and simulation output",
+                  font=("",14,"bold")).pack(anchor="w")
+        ttk.Label(tab,text="Each question includes current settings, calculated quantities, "
+                  "and the latest run's numerical plot data and console output.\nQuestions are independent. Answers cannot change parameters "
+                  "or run simulations.",wraplength=900).pack(anchor="w",pady=8)
+        ttk.Label(tab,text="Codex uses ChatGPT sign-in and your plan's usage limits. Settings, output and relevant "
+                  "project files it reads are sent to OpenAI. Read-only project access; API-key billing is disabled.",
+                  wraplength=900).pack(anchor="w",pady=(0,8))
+        self.check_codex_button=ttk.Button(tab,text="Check Codex",command=self.check_codex_connection)
+        self.check_codex_button.pack(anchor="w")
+        self.assistant_status=tk.StringVar(value="Click Check Codex or ask a question. The answer appears when Codex finishes.")
+        ttk.Label(tab,textvariable=self.assistant_status,wraplength=900).pack(anchor="w",pady=8)
+        self.numerical_status=tk.StringVar(value="Run a simulation in this panel to provide numerical plot data.")
+        ttk.Label(tab,textvariable=self.numerical_status,wraplength=900).pack(anchor="w",pady=(0,8))
+        self.assistant_output=ScrolledText(tab,wrap="word",height=12,state="disabled")
+        self.assistant_output.pack(fill="both",expand=True)
+        ttk.Label(tab,text="Your question (up to 1,000 characters):").pack(anchor="w",pady=(8,3))
+        self.assistant_question=tk.Text(tab,height=3,wrap="word")
+        self.assistant_question.pack(fill="x")
+        self.assistant_question.insert("1.0","Explain my current detunings and pulse durations. What should I check before running?")
+        buttons=ttk.Frame(tab)
+        buttons.pack(fill="x",pady=8)
+        self.ask_button=ttk.Button(buttons,text="Ask assistant",command=self.ask_assistant)
+        self.ask_button.pack(side="left")
+        self.cancel_answer_button=ttk.Button(buttons,text="Cancel answer",command=self.cancel_answer,state="disabled")
+        self.cancel_answer_button.pack(side="left",padx=8)
+
+    def assistant_append(self,text):
+        self.assistant_output.configure(state="normal")
+        self.assistant_output.insert("end",text)
+        self.assistant_output.see("end")
+        self.assistant_output.configure(state="disabled")
+
+    def check_codex_connection(self):
+        self.check_codex_button.configure(state="disabled")
+        self.assistant_status.set("Checking Codex sign-in...")
+        def worker():
+            try:
+                check_codex()
+                self.events.put(("codex_ready","Codex is ready with ChatGPT sign-in."))
+            except Exception as exc:
+                self.events.put(("codex_error",str(exc)))
+        threading.Thread(target=worker,daemon=True).start()
+
+    def ask_assistant(self):
+        question=self.assistant_question.get("1.0","end").strip()
+        if not question or len(question)>1000:
+            self.assistant_status.set("Enter a question between 1 and 1,000 characters.")
+            return
+        try:
+            messages=build_messages(question,self.config(),self.mode.get(),self.last_run)
+        except ValueError as exc:
+            messagebox.showerror("Check parameters",str(exc))
+            return
+        self.assistant_request+=1
+        request_id=self.assistant_request
+        self.assistant_cancel=threading.Event()
+        cancelled=self.assistant_cancel
+        project_root=self.backend_path.parent.parent
+        self.ask_button.configure(state="disabled")
+        self.cancel_answer_button.configure(state="normal")
+        self.assistant_status.set("Asking Codex... settings captured when you clicked Ask. The answer appears when Codex finishes.")
+        self.assistant_append(f"\nYou: {question}\nAssistant (Codex):\n")
+        def worker():
+            try:
+                response=codex_answer(messages,cancelled,project_root)
+                for text in response:
+                    self.events.put(("assistant_text",(request_id,text)))
+                self.events.put(("assistant_done",(request_id,"Answer finished. Check suggested explanations against simulation results.")))
+            except Exception as exc:
+                self.events.put(("assistant_error",(request_id,f"Codex error: {exc}")))
+        threading.Thread(target=worker,daemon=True).start()
+
+    def cancel_answer(self):
+        self.assistant_cancel.set()
+        self.assistant_request+=1  # Ignore queued tokens from the cancelled worker.
+        self.ask_button.configure(state="normal")
+        self.cancel_answer_button.configure(state="disabled")
+        self.assistant_status.set("Answer cancelled.")
+        self.assistant_append("\n[Answer cancelled]\n")
 
     def update_swap_rates(self,*_):
         try:
@@ -383,13 +473,22 @@ class ParameterPanel:
             return
         if not self.check():
             return
+        run_config=self.config()
         with tempfile.NamedTemporaryFile(mode="w",suffix=".json",prefix="hybrid-settings-",delete=False) as f:
-            json.dump(self.config(),f)
+            json.dump(run_config,f)
             self.temp_path=Path(f.name)
         mode_args=dict(MODES)[self.mode.get()]
+        reports_root=self.backend_path.parent.parent/"output"/"assistant_runs"
+        try:
+            reports_root.mkdir(parents=True,exist_ok=True)
+            report_directory=tempfile.mkdtemp(prefix="run-",dir=reports_root)
+        except OSError as exc:
+            self.temp_path.unlink(missing_ok=True)
+            messagebox.showerror("Could not prepare simulation output",str(exc))
+            return
         # An explicit --run bypasses the startup panel in the child.
         command=[sys.executable,"-u",str(self.backend_path),
-                 "--run","--config",str(self.temp_path),*mode_args]
+                 "--run","--config",str(self.temp_path),"--assistant-output",report_directory,*mode_args]
         if self.save.get():
             command.append("--save")
         try:
@@ -400,6 +499,9 @@ class ParameterPanel:
             messagebox.showerror("Could not start simulation",str(exc))
             return
         self.run_button.configure(state="disabled")
+        self.last_run={"settings":run_config,"mode":self.mode.get(),"status":"running","output":"",
+                       "output_directory":report_directory}
+        self.numerical_status.set("Numerical reports are being calculated for this run. Ask after a figure is ready.")
         self.stop_button.configure(state="normal")
         self.status.set("Calculating. Selected plot windows will open when ready; close them to finish the run.")
         self.append("\n--- New simulation ---\n")
@@ -416,7 +518,35 @@ class ParameterPanel:
                 kind,value=self.events.get_nowait()
                 if kind=="line":
                     self.append(value)
-                else:
+                    if self.last_run is not None:
+                        self.last_run["output"]=(self.last_run["output"]+value)[-3000:]
+                        if value.startswith("Assistant numerical report ready:"):
+                            self.numerical_status.set("Numerical plot data is available. Ask now, even while plot windows remain open. "
+                                                      "Files: "+self.last_run["output_directory"])
+                elif kind in ("codex_ready","codex_error"):
+                    self.check_codex_button.configure(state="normal")
+                    self.assistant_status.set(value)
+                elif kind.startswith("assistant_"):
+                    request_id,text=value
+                    if request_id!=self.assistant_request:
+                        continue
+                    if kind=="assistant_text":
+                        self.assistant_append(text)
+                    else:
+                        self.ask_button.configure(state="normal")
+                        self.cancel_answer_button.configure(state="disabled")
+                        if kind=="assistant_error":
+                            self.assistant_append("\n"+text+"\n")
+                        else:
+                            self.assistant_append("\n")
+                        self.assistant_status.set(text)
+                elif kind=="done":
+                    if self.last_run is not None:
+                        self.last_run["status"]="finished" if value==0 else "stopped or failed"
+                        folder=Path(self.last_run["output_directory"])
+                        available=[name for name in ("write","read","roundtrip") if (folder/(name+".json")).is_file()]
+                        self.numerical_status.set("Numerical reports available: "+", ".join(available)+". Files: "+str(folder)
+                                                  if available else "No numerical reports were produced for this run. See the calculation log.")
                     self.status.set("Run finished. Edit parameters and run again." if value==0
                                     else "Run stopped or failed. See the calculation log.")
                     self.run_button.configure(state="normal")
@@ -438,6 +568,7 @@ class ParameterPanel:
             if not messagebox.askyesno("Close simulation panel","Stop the active run and close the panel?"):
                 return
             self.process.terminate()
+        self.assistant_cancel.set()
         if self.temp_path:
             self.temp_path.unlink(missing_ok=True)
         self.root.destroy()

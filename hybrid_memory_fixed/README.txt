@@ -2,12 +2,55 @@ Keep backend.py, hybrid_panel.py and hybrid_settings.py in the same folder.
 Start the parameter panel: python backend.py
 Direct plots without the panel: python backend.py --run
 
+Flux and electric-field pulses now make a rounded excursion with no plateau:
+w(t) = sin^2(pi*(t-start)/T) inside each swap interval, zero outside.
+The applied flux is PHI_PARK + (PHI_SWAP-PHI_PARK)*w(t); the total electric
+field is E_PARK + (E_SWAP-E_PARK)*w(t). Stray-field compensation is retained.
+Both controls reach their interaction value at the midpoint and return to park
+with zero endpoint slopes. Readout uses the same shape in the reverse order.
+Optical pulses retain their existing sin-squared envelopes.
+These finite pulses have a nonzero spectral width, not exactly one frequency.
+Stage durations are T_TC = TC_PULSE_SCALE*(pi/(2*g_TC) + 2*RAMP) and
+T_AC = AC_PULSE_SCALE*(pi/(2*g_AC) + 2*RAMP). The multipliers independently
+stretch the rounded pulses; RAMP contributes to the reference time before scaling.
+The resonant hold time is only a reference: the pulse peaks pass beyond bare
+resonance, producing two coherent passages through resonance per pulse.
+The couplings, peak controls and durations have been calibrated using the full,
+always-on-coupling Hamiltonian for writing and independent readout. The rounded
+shape, 5 us storage, lifetimes and dephasing rates are retained. This is a local
+numerical calibration of an illustrative model, not an experimental calibration
+or proof of a global optimum. Residual coherent errors and finite dissipation
+prevent exactly 100% fidelity. Changing device inputs requires recalibration.
+Restart the panel and select Reset defaults to use the new values. Loading old
+settings retains saved values; absent pulse multipliers take the new defaults.
+For the former unscaled rounded pulses, explicitly set both multipliers to 1.
+
+Rounded-pulse calibration (default parameters in hybrid_settings.py):
+PHI_SWAP=0.26588630919611617, V_SWAP=0.3923668021130249 V,
+BETA=0.04, E_ZPF_V_PER_M=0.8 V/m, OMEGA/(2*pi)=100 MHz,
+TC_PULSE_SCALE=9.664304506350172, AC_PULSE_SCALE=3.3585450169623496.
+The TC pulse lasts 228.834 ns, the AC pulse 85.383 ns, and each optical
+pulse 10 ns. Peak detunings are -53.7114 MHz (TC) and -20.0464 MHz (AC).
+The optical envelopes remain sin-squared; faster optical pulses reduce exposure
+to loss and unwanted exchange while mapping. All loss rates are unchanged.
+
+Independent six-state validation after 5 us storage:
+Input              Noiseless write/read      Noisy write          Noisy read
+0                  99.9897%                  99.6355%             99.6355%
+1                  99.9167%                  99.3258%             99.3258%
+Each of +,-,+i,-i   99.9532%                  99.4642%             99.4639%
+Fidelities are unconditional joint overlaps, with one fixed noiseless phase
+reference per direction shared by all six inputs. The tests check these six
+states in both directions, solver-step convergence, and round trips at multiple
+storage durations. Unscaled rounded pulses with the former coupling values
+gave only 0.145% noiseless excited-state transfer; they were not calibrated.
+
 The default output is two independent state-transfer windows:
 transmon to atom and atom to transmon. The write figure summarizes total write
-time, nominal swap holds (excluding ramps), final joint fidelities for g/e/+,
+time, rounded swap pulse durations, final joint fidelities for g/e/+,
 and selected-input coherence and residual populations in a table. The selected
 input is identified by its Bloch angles below the figure. The read figure has
-a matching table of storage hold, readout and combined duration, nominal swap holds, final joint fidelities for
+a matching table of storage hold, readout and combined duration, rounded pulse durations, final joint fidelities for
 the two logical basis inputs and +, selected-input transmon coherence, cavity
 photons, atom reset h0 population, and residual atomic populations. Metrics include
 configured noise; fidelity uses a fixed phase correction without postselection.
@@ -72,7 +115,7 @@ sets the effective EJ and the resulting n_01.
 The formulas are g_TC = 2 e beta V_zpf [EJ(Phi_swap)/(32 EC)]^(1/4) / hbar and
 g_AC = |d_01| E_zpf |cos(theta)| / hbar. The calculated couplings are g/(2*pi) in MHz;
 the Hamiltonian uses g in rad/us. Swap hold times use these same calculated
-couplings. Defaults give approximately 2.770 MHz and 1.024 MHz, respectively.
+couplings. The current defaults give approximately 11.0 MHz and 10.2 MHz, respectively.
 Voltage and field inputs are local vacuum RMS amplitudes; the static electrode
 field used for Stark tuning is separate. No cavity geometry or atomic wave
 functions are solved. Supply the selected atomic transition dipole. The
@@ -97,17 +140,16 @@ The applied interaction flux PHI_SWAP (Phi/Phi0) is an independent input on
 0 <= PHI_SWAP <= 0.5. The transmon resonance is calculated from it:
 EJ(phi) = EJ_MAX*sqrt(cos(pi*phi)^2 + d^2*sin(pi*phi)^2),
 f_T(phi) = sqrt(8*EC*EJ(phi)) - EC, with EC and EJ in MHz.
-The default flux preserves the previous 5000 MHz interaction resonance.
+The default peak flux passes beyond the 5000 MHz interaction resonance.
 The parked flux PHI_PARK is also an input on 0 <= PHI_PARK <= 0.5;
 its resonance frequency is calculated with the same forward relation.
 The default parked flux preserves the previous 5800 MHz parked resonance.
 The interaction frequency is displayed live and can be detuned from the cavity.
 The coupling is evaluated at this transmon operating point and determines
-the nominal resonant hold time pi/(2*g_TC). Read and write use the same plateau.
+the nominal resonant reference time pi/(2*g_TC). Read and write use the same rounded shape.
 The atomic swap voltage V_SWAP remains an independent input. Its field is
 E_swap = V_SWAP/GAP_CM + STRAY_FIELD; the atomic transition can be detuned.
-At FC=4900 MHz with other defaults unchanged (calculated f_T=5000 MHz),
-both transmon-cavity and atom-cavity detunings are +100 MHz. Changing FC alone
+Reducing FC by 100 MHz increases both peak detunings by +100 MHz. Changing FC alone
 does not retune either transition or change the nominal swap holds.
 The panel reports both detunings. Detuning reduces excitation transfer.
 The Cavity and transmon tab also displays the interaction and parked
@@ -126,7 +168,7 @@ model and units. The larger panel shows inputs and equations side by side
 without scrollbars, with the initial window sized to the screen. The numerical tab documents the
 master equation, state-space truncation, and integration-step setting.
 
-High-fidelity default operating point:
+Historical plateau-pulse benchmark (does not apply to the rounded pulses):
 BETA=0.01, E_ZPF_V_PER_M=0.08, OMEGA=20 MHz, RAMP=0.0005 us.
 The previous BETA=0.1 gave g_TC/(2*pi)=27.70 MHz. At the 800 MHz park
 detuning its spectator interaction shifted the cavity by roughly 0.96 MHz,
@@ -159,3 +201,58 @@ atomic six-state mean is 1/3, while excited-input write fidelity is zero and
 round-trip return fidelity is one. No values are forced to zero or normalized
 by transfer success. These curves characterize the configured write-and-hold
 protocol; failed writing cannot establish the intrinsic atomic memory lifetime.
+
+Codex assistant:
+Install the Codex CLI if it is not already on PATH, then run codex login in a
+terminal and sign in with ChatGPT. Restart the panel from that terminal. In the
+Assistant tab click Check Codex, then ask your question. Each request
+uses a separate codex exec session and the CLI's built-in default model.
+No MCP server, Python dependency, or API key is required.
+For macOS GUI launches with a limited PATH, the panel also searches common CLI
+installation directories and the architecture-matching Codex executable bundled
+with the OpenAI VS Code/VS Code Insiders extension. PATH installations take
+precedence; the newest executable extension version is selected as a fallback.
+An existing signed-in extension installation does not need a separate CLI install.
+
+Each question includes validated current inputs, units, calculated quantities,
+and the latest simulation's original settings, mode, status and last 3,000
+characters of console output, separately from current edits. New panel runs
+also automatically export full numerical reports to unique folders under
+output/assistant_runs, even when Also save plots/data is unchecked. Reports
+include selected-input joint-fidelity and coherence traces, all eight population/
+photon-number traces, flux and voltage controls, detunings, stage timing, exact
+summary values, displayed tables and logical basis-output probabilities/fidelities.
+Write dynamics end before storage; after-storage values are reported separately.
+Read dynamics start after the storage hold, from an independently prepared atom.
+Every basis-output column is labeled, including wrong Rydberg and remaining other.
+
+Each assistant question includes a preview of up to 33 points per trace, full-grid
+sampled minima/maxima with their times, and paths to full-resolution JSON files
+which Codex may read for closer inspection. Previews can miss narrow features;
+extrema describe the exported grid rather than continuous time. The assistant
+does not receive screenshot images. Reports are published atomically as each
+direction finishes computing, before the blocking plot windows close. The panel
+shows when reports are available; ask again after another direction finishes.
+New runs use new folders, and report settings must match the original run.
+Stopped/failed runs may have partial reports, which retain that run's status.
+Old runs made before this feature have no numerical reports; run a new simulation.
+Reports remain on disk after closing the panel for inspection.
+
+Codex may read
+relevant project source and documentation. It cannot see the screen or automatically
+inherit this chat. Context and files read by Codex are sent to OpenAI; internet
+access is required and your ChatGPT plan's Codex usage limits apply. This is not
+free offline inference. API-key authentication is rejected, inherited OpenAI API
+key variables are removed, and ChatGPT authentication is required for execution.
+
+The CLI runs with a read-only sandbox and no interactive approvals. It is
+instructed not to edit files or run simulations. User CLI configuration is not
+loaded for these requests (authentication is retained), so personal MCP servers
+and custom model settings are not inherited. The final answer appears when Codex
+finishes; a three-minute timeout and Cancel answer terminate the request's
+process group. Existing Codex sessions are not stopped. Connection checks and answers
+run in background workers so the panel remains usable.
+
+Check the assistant without making network requests:
+  python -m unittest discover -s hybrid_memory_fixed -p 'test_*assistant.py'
+  python -m unittest discover -s hybrid_memory_fixed -p 'test_simulation_output.py'

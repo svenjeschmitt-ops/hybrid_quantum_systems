@@ -18,6 +18,9 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 import qutip as qt
 from pathlib import Path
+from simulation_output import trace, write_report
+
+_ASSISTANT_OUTPUT = None
 
 _config_parser = argparse.ArgumentParser(add_help=False)
 _config_parser.add_argument("--config")
@@ -523,6 +526,30 @@ def main(check=False, save=False):
             ax.axvline(end, color="gray", alpha=0.15)
     fig.suptitle("Transmon to atom")
     fig.canvas.manager.set_window_title("Transmon to atom")
+    if _ASSISTANT_OUTPUT:
+        names = ("transmon_e", "cavity_mean_photons", "atom_h0", "atom_h1",
+                 "atom_r0", "atom_r1", "atom_loss", "atom_wrong_rydberg")
+        write_report(_ASSISTANT_OUTPUT, "write", _SETTINGS,
+            metadata={"noise_enabled": True, "input_theta_degrees": float(np.rad2deg(theta)),
+                      "input_phi_degrees": float(np.rad2deg(phi)), "phase_correction_rad": float(phase),
+                      "stages_us": dict(preparation=PREP, transmon_cavity=TC, atom_cavity=AC, mapping=MAP),
+                      "storage_duration_us": STORAGE,
+                      "time_origin": "Beginning of writing; dynamics end before the storage hold.",
+                      "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",
+                      "fidelity_definition": "Unconditional joint target overlap; fixed noiseless phase; no postselection.",
+                      "basis_evaluation": "After writing AND storage; inputs are original transmon g/e/+"},
+            summary={"displayed_metrics": summary_rows, "selected_fidelity_before_storage": float(fidelity[-1]),
+                     "selected_fidelity_after_storage": held_fidelity,
+                     "selected_coherence_after_storage": float(held_coherence),
+                     "populations_after_storage": dict(zip(names, held_pops))},
+            traces={"selected_input_dynamics": trace(ts, joint_fidelity=fidelity,
+                        atomic_coherence_2abs_rho_h0_h1=coherence, **dict(zip(names, pops))),
+                    "controls": trace(x, flux_Phi_over_Phi0=[flux(t) for t in x],
+                        electrode_voltage_V=[electrode_voltage(t) for t in x],
+                        transmon_detuning_MHz=[delta_t(t)/TWOPI for t in x],
+                        atom_detuning_MHz=[(delta_r1(t)-delta_r0(t))/TWOPI for t in x])},
+            basis={"input_labels": labels, "joint_output_labels": ["g,0,h0", "g,0,h1", "wrong_rydberg", "remaining_other"],
+                   "probabilities": probabilities, "joint_fidelities": input_fidelities})
     output = Path(__file__).with_name("hybrid_controls.png")
     if save:
         fig.savefig(output, dpi=170)
@@ -1148,6 +1175,33 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     subtitle = "After writing and storage" if roundtrip else f"Retrieval from {source} memory after {STORAGE:g} µs storage"
     fig.suptitle(title + "\n" + subtitle)
     fig.canvas.manager.set_window_title(title)
+    if _ASSISTANT_OUTPUT:
+        names = ("transmon_e", "cavity_mean_photons", "atom_h0", "atom_h1",
+                 "atom_r0", "atom_r1", "atom_loss", "atom_wrong_rydberg")
+        output_pops = np.asarray([np.real(qt.expect(op, states))
+                                 for op in (Pe, n, Ph0, Ph1, Pr0, Pr1, Plost, Pwrong)])
+        write_report(_ASSISTANT_OUTPUT, "roundtrip" if roundtrip else "read", _SETTINGS,
+            metadata={"noise_enabled": True, "source": source, "roundtrip": roundtrip,
+                      "input_theta_degrees": float(np.rad2deg(theta)), "input_phi_degrees": float(np.rad2deg(phi)),
+                      "phase_correction_rad": float(phase), "stages_us": dict(stages),
+                      "storage_duration_us": STORAGE,
+                      "time_origin": "Retrieval begins at zero AFTER storage; initial state already includes the hold.",
+                      "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",
+                      "fidelity_definition": "Unconditional joint target overlap; fixed noiseless phase; no postselection.",
+                      "basis_evaluation": "After storage and retrieval; independent atomic inputs unless roundtrip."},
+            summary={"displayed_metrics": summary_rows if not roundtrip else summary_lines,
+                     "selected_joint_fidelity": float(joint[-1]), "selected_raw_transmon_overlap": float(raw[-1]),
+                     "selected_phase_corrected_transmon_overlap": float(corrected[-1]),
+                     "selected_transmon_coherence": float(coherence[-1]),
+                     "atomic_joint_before_retrieval_if_roundtrip": atomic_joint},
+            traces={"selected_input_dynamics": trace(ts, joint_fidelity=joint,
+                        raw_transmon_overlap=raw, phase_corrected_transmon_overlap=corrected,
+                        transmon_coherence_2abs_rho_g_e=coherence, **dict(zip(names, output_pops))),
+                    "controls": trace(ts, flux_Phi_over_Phi0=[flux_read(t) for t in ts],
+                        electrode_voltage_V=[voltage_read(t) for t in ts],
+                        transmon_detuning_MHz=transmon_detuning, atom_detuning_MHz=atom_detuning)},
+            basis={"input_labels": labels, "joint_output_labels": ["g,0,h0", "e,0,h0", "wrong_rydberg", "remaining_other"],
+                   "probabilities": probabilities, "joint_fidelities": input_fidelities})
     stem = "hybrid_roundtrip" if roundtrip else f"hybrid_retrieval_{source}"
     output = Path(__file__).with_name(stem + ".png")
     if save:
@@ -1517,8 +1571,10 @@ if __name__ == "__main__":
                         help="Paper-style preparation, dynamics, and write probabilities.")
     parser.add_argument("--run", action="store_true", help="Run figures directly, bypassing the startup panel.")
     parser.add_argument("--config", help="JSON object of parameter overrides.")
+    parser.add_argument("--assistant-output", help="Directory for run-specific numerical assistant reports.")
     parser.add_argument("--write-only", action="store_true", help="Only the transmon-to-atom transfer figure.")
     args = parser.parse_args()
+    _ASSISTANT_OUTPUT = args.assistant_output
     selected_modes = sum((args.paper_figure, args.retrieve, args.roundtrip,
                           args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only))
     if selected_modes > 1:
