@@ -19,8 +19,17 @@ from matplotlib.patches import FancyBboxPatch
 import qutip as qt
 from pathlib import Path
 from simulation_output import trace, write_report
+import tolerance_bands
 
 _ASSISTANT_OUTPUT = None
+
+# Static experimental errors. Only the tolerance scan changes these; all
+# nominal controls, timings, couplings and optical carrier phases stay fixed.
+TOLERANCE_OFFSETS = dict(FC=0.0, FT=0.0, FA=0.0, FLUX=0.0, EFIELD=0.0)
+
+def cavity_error(t):
+    return 2 * np.pi * TOLERANCE_OFFSETS["FC"]
+
 
 _config_parser = argparse.ArgumentParser(add_help=False)
 _config_parser.add_argument("--config")
@@ -129,7 +138,7 @@ def optical_envelope(t, start, end):
     return 0.0
 
 def flux(t):
-    return PHI_PARK + (PHI_SWAP - PHI_PARK) * smooth_window(t, *TC)
+    return PHI_PARK + (PHI_SWAP - PHI_PARK) * smooth_window(t, *TC) + TOLERANCE_OFFSETS["FLUX"]
 
 def electrode_voltage(t):
     # E = V/d + E_stray; park voltage compensates the assumed static stray field.
@@ -137,7 +146,7 @@ def electrode_voltage(t):
     return GAP_CM * (desired_field - STRAY_FIELD)
 
 def electric_field(t):
-    return electrode_voltage(t) / GAP_CM + STRAY_FIELD
+    return electrode_voltage(t) / GAP_CM + STRAY_FIELD + TOLERANCE_OFFSETS["EFIELD"]
 
 # Hilbert space: two-level transmon, 3 cavity states, 6 atomic states.
 # Basis: h0, h1, r0, r1, loss, wrong-Rydberg.
@@ -163,13 +172,13 @@ Zr, Zh = Pr1 - Pr0, Ph1 - Ph0
 # removed separately; lower Rydberg reference is its zero-field energy.
 # Thus upper Rydberg reference offset is F_A_ZERO - FC.
 def delta_t(t):
-    return TWOPI * (transmon_frequency(flux(t)) - FC)
+    return TWOPI * (transmon_frequency(flux(t)) + TOLERANCE_OFFSETS["FT"] - FC)
 
 def delta_r0(t):
     return TWOPI * K_R0 * electric_field(t)**2
 
 def delta_r1(t):
-    return TWOPI * (F_A_ZERO - FC + K_R1 * electric_field(t)**2)
+    return TWOPI * (F_A_ZERO + TOLERANCE_OFFSETS["FA"] - FC + K_R1 * electric_field(t)**2)
 
 def delta_wrong(t):
     return TWOPI * (F_WRONG_SPLIT + K_WRONG * electric_field(t)**2)
@@ -215,6 +224,7 @@ Bmap0 = A(h0, r0) + REL_WRONG_DIPOLE * A(h0, wrong)
 Bmap1 = A(h1, r1)
 H = qt.QobjEvo([ #construction of the hamiltonian 
     H_coupling, # contrains the transmon-cavity and atom-cavity interactions
+    [n, cavity_error], # cavity drift in the fixed nominal rotating frame
     [Pe, delta_t], # time dependent transmon excitation energy offset
     [Pr0, delta_r0], # time dependent Rydberg energy offset
     [Pr1, delta_r1],# time dependent Rydberg energy offset
@@ -433,14 +443,21 @@ def main(check=False, save=False):
         print("Physical-state checks passed.")
         return
 
+    held_state = hold_memory(states[-1])
+    held_fidelity = float(np.real(qt.expect(atomic_storage_effect(transfer_target, phase), held_state)))
+    labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase, storage=True)
+    bands = tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "write", alpha, beta,
+                                    phase, ts, pops, fidelity, held_fidelity,
+                                    nominal_state=held_state, nominal_basis=input_fidelities)
+    summary_row = 2
     fig = plt.figure(figsize=(12, 10), layout="constrained")
-    grid = fig.add_gridspec(3, 2)
+    grid = fig.add_gridspec(summary_row + 1, 2)
     control_axis = fig.add_subplot(grid[0, 0])
     voltage_axis = control_axis.twinx()
     detuning_axis = fig.add_subplot(grid[0, 1])
     population_axis = fig.add_subplot(grid[1, :])
-    performance_axis = fig.add_subplot(grid[2, 0])
-    basis_axis = fig.add_subplot(grid[2, 1], projection="3d")
+    performance_axis = fig.add_subplot(grid[summary_row, 0])
+    basis_axis = fig.add_subplot(grid[summary_row, 1], projection="3d")
     x = np.linspace(0, MAP[1], 2501)
     flux_line, = control_axis.plot(x, [flux(t) for t in x],
                                    color="tab:blue", label="Flux (left axis)")
@@ -472,12 +489,9 @@ def main(check=False, save=False):
         population_axis.plot(ts[transfer], line[transfer], label=label)
     population_axis.set(ylabel="Population / photon number", title="Write transfer dynamics")
     population_axis.legend(fontsize=8, ncol=2)
-    held_state = hold_memory(states[-1])
-    held_fidelity = float(np.real(qt.expect(atomic_storage_effect(transfer_target, phase), held_state)))
     held_coherence = 2 * abs(held_state.ptrace(2)[0, 1])
     held_pops = np.real([qt.expect(op, held_state)
                          for op in (Pe, n, Ph0, Ph1, Pr0, Pr1, Plost, Pwrong)])
-    labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase, storage=True)
     print(f"Joint fidelity AFTER {STORAGE:g} us storage: {held_fidelity:.6f}")
     performance_axis.set_axis_off()
     performance_axis.set_title("Write + storage summary")
@@ -499,8 +513,11 @@ def main(check=False, save=False):
         ["Selected input: atomic loss population", f"{held_pops[6]:.3e}"],
         ["Selected input: wrong-Rydberg population", f"{held_pops[7]:.3e}"],
     ]
-    table = results_table(performance_axis, ["Metric", "Value"],
-                          summary_rows, widths=[.74, .26],
+    summary_rows = tolerance_bands.table_rows(summary_rows, bands, "write")
+    if bands:
+        tolerance_bands.draw(bands, control_axis, detuning_axis, population_axis)
+    table = results_table(performance_axis, ["Metric", "Nominal", "With tolerances"],
+                          summary_rows, widths=[.58, .16, .26],
                           bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
     for row in range(1, len(summary_rows) + 1):
         table[row, 0].set_text_props(ha="left")
@@ -512,7 +529,7 @@ def main(check=False, save=False):
         np.savetxt(csv_output, data, delimiter=",", comments="",
                    header="transfer_time_us,ground_joint_fidelity,excited_joint_fidelity,plus_joint_fidelity")
         print(f"Saved {csv_output}", flush=True)
-    plot_basis_columns(basis_axis, labels, probabilities, "Write outputs after storage")
+    plot_basis_columns(basis_axis, labels, probabilities, "Write outputs after storage" + (" (nominal)" if bands else ""))
     basis_axis.set_box_aspect((4, 4, 3), zoom=.98)
     basis_axis.xaxis.labelpad = -5
     fig.supxlabel(f"Selected input: θ={np.rad2deg(theta):g}°, φ={np.rad2deg(phi):g}°.\n"
@@ -524,7 +541,7 @@ def main(check=False, save=False):
         for start, end in (PREP, TC, AC, MAP):
             ax.axvline(start, color="gray", alpha=0.15)
             ax.axvline(end, color="gray", alpha=0.15)
-    fig.suptitle("Transmon to atom")
+    fig.suptitle("Transmon to atom" + (" — shaded sampled tolerance ranges" if bands else ""))
     fig.canvas.manager.set_window_title("Transmon to atom")
     if _ASSISTANT_OUTPUT:
         names = ("transmon_e", "cavity_mean_photons", "atom_h0", "atom_h1",
@@ -538,11 +555,13 @@ def main(check=False, save=False):
                       "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",
                       "fidelity_definition": "Unconditional joint target overlap; fixed noiseless phase; no postselection.",
                       "basis_evaluation": "After writing AND storage; inputs are original transmon g/e/+"},
-            summary={"displayed_metrics": summary_rows, "selected_fidelity_before_storage": float(fidelity[-1]),
+            summary={"tolerance_ranges": bands["summary"] if bands else None,
+                     "displayed_metrics": summary_rows, "selected_fidelity_before_storage": float(fidelity[-1]),
                      "selected_fidelity_after_storage": held_fidelity,
                      "selected_coherence_after_storage": float(held_coherence),
                      "populations_after_storage": dict(zip(names, held_pops))},
-            traces={"selected_input_dynamics": trace(ts, joint_fidelity=fidelity,
+            traces={**tolerance_bands.report_traces(bands),
+                    "selected_input_dynamics": trace(ts, joint_fidelity=fidelity,
                         atomic_coherence_2abs_rho_h0_h1=coherence, **dict(zip(names, pops))),
                     "controls": trace(x, flux_Phi_over_Phi0=[flux(t) for t in x],
                         electrode_voltage_V=[electrode_voltage(t) for t in x],
@@ -670,23 +689,23 @@ def retrieval_model(source="hyperfine"):
     cleanup = (tc[1] + GAP, tc[1] + GAP + T_OPT)
 
     def flux_read(t):
-        return PHI_PARK + (PHI_SWAP - PHI_PARK) * smooth_window(t, *tc)
+        return PHI_PARK + (PHI_SWAP - PHI_PARK) * smooth_window(t, *tc) + TOLERANCE_OFFSETS["FLUX"]
 
     def voltage_read(t):
         field = E_PARK + (E_SWAP - E_PARK) * smooth_window(t, *ac)
         return GAP_CM * (field - STRAY_FIELD)
 
     def field_read(t):
-        return voltage_read(t) / GAP_CM + STRAY_FIELD
+        return voltage_read(t) / GAP_CM + STRAY_FIELD + TOLERANCE_OFFSETS["EFIELD"]
 
     def dt_read(t):
-        return TWOPI * (transmon_frequency(flux_read(t)) - FC)
+        return TWOPI * (transmon_frequency(flux_read(t)) + TOLERANCE_OFFSETS["FT"] - FC)
 
     def d0_read(t):
         return TWOPI * K_R0 * field_read(t)**2
 
     def d1_read(t):
-        return TWOPI * (F_A_ZERO - FC + K_R1 * field_read(t)**2)
+        return TWOPI * (F_A_ZERO + TOLERANCE_OFFSETS["FA"] - FC + K_R1 * field_read(t)**2)
 
     def dw_read(t):
         return TWOPI * (F_WRONG_SPLIT + K_WRONG * field_read(t)**2)
@@ -724,6 +743,7 @@ def retrieval_model(source="hyperfine"):
 
     h_read = qt.QobjEvo([
         H_coupling,
+        [n, cavity_error],
         [Pe, dt_read], [Pr0, d0_read], [Pr1, d1_read], [Pwrong, dw_read],
         [Bmap0, unmap0], [Bmap0.dag(), unmap0_conj],
         [Bmap1, unmap1], [Bmap1.dag(), unmap1_conj],
@@ -1059,12 +1079,20 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     # The round trip uses only the complete state after writing and storage.
     cases = [("After writing and storage" if roundtrip else
               f"Atomic input after {STORAGE:g} µs storage", ts, states, corrected, joint)]
+    labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
+    nominal_pops = np.real([qt.expect(op, states) for op in
+                            (Pe, n, Ph0, Ph1, Pr0, Pr1, Plost, Pwrong)])
+    bands = (tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "read", alpha, beta,
+                                     phase, ts, nominal_pops, joint, joint[-1], source,
+                                     nominal_state=rho_final, nominal_basis=input_fidelities)
+             if not roundtrip else None)
+    summary_row = 2
     fig = plt.figure(figsize=(12, 10), layout="constrained")
-    grid = fig.add_gridspec(3, 2)
+    grid = fig.add_gridspec(summary_row + 1, 2)
     flux_axis = fig.add_subplot(grid[0, 0])
     voltage_axis = flux_axis.twinx()
     detuning_axis = fig.add_subplot(grid[0, 1])
-    performance_axis = fig.add_subplot(grid[2, 0])
+    performance_axis = fig.add_subplot(grid[summary_row, 0])
     flux_line, = flux_axis.plot(ts, [flux_read(t) for t in ts],
                                color="tab:blue", label="Flux (left axis)", zorder=3)
     voltage_line, = voltage_axis.plot(ts, [voltage_read(t) for t in ts],
@@ -1090,7 +1118,6 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     detuning_axis.legend(fontsize=8)
     if roundtrip:
         plot_storage_fidelity(performance_axis, save=save)
-    labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
     if not roundtrip:
         pair = ("h0", "h1") if source == "hyperfine" else ("r0", "r1")
         final_populations = [float(np.real(qt.expect(op, rho_final)))
@@ -1112,9 +1139,10 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             ["Selected input: atomic loss population", f"{final_populations[3]:.3e}"],
             ["Selected input: wrong-Rydberg population", f"{final_populations[4]:.3e}"],
         ]
+        summary_rows = tolerance_bands.table_rows(summary_rows, bands, "read")
         performance_axis.set_title("Storage + readout summary")
-        table = results_table(performance_axis, ["Metric", "Value"], summary_rows,
-                              widths=[.74, .26], bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
+        table = results_table(performance_axis, ["Metric", "Nominal", "With tolerances"], summary_rows,
+                              widths=[.58, .16, .26], bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
         for row in range(1, len(summary_rows) + 1):
             table[row, 0].set_text_props(ha="left")
         if save:
@@ -1124,9 +1152,10 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
                        header="transfer_time_us,ground_joint_fidelity,excited_joint_fidelity,plus_joint_fidelity")
             print(f"Saved {csv_output}", flush=True)
     for index, (label, _, _, _, _) in enumerate(cases):
-        basis_axis = fig.add_subplot(grid[2, index + 1], projection="3d")
+        basis_axis = fig.add_subplot(grid[summary_row, index + 1], projection="3d")
         selection = slice(3 * index, 3 * index + 3)
         title = "Transmon return after write/store" if roundtrip else "After storage + retrieval: " + source
+        title += " (nominal)" if bands else ""
         plot_basis_columns(basis_axis, labels[selection], probabilities[selection], title,
                            mode="read", input_label="Original transmon input" if roundtrip else None)
         if not roundtrip:
@@ -1162,6 +1191,8 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             populations.plot(case_ts, np.real(qt.expect(op, case_states)), label=name)
         populations.set(ylabel="Population / photon number", title=label)
         populations.legend(fontsize=8, ncol=2)
+    if bands:
+        tolerance_bands.draw(bands, flux_axis, detuning_axis, population_axes[0], read=True)
     # Match population scales without assuming photon number is bounded by one.
     upper = max(ax.get_ylim()[1] for ax in population_axes)
     for ax in population_axes:
@@ -1173,7 +1204,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             ax.axvline(end, color="gray", alpha=0.15)
     title = "Write–store–read: transmon return" if roundtrip else "Atom to transmon"
     subtitle = "After writing and storage" if roundtrip else f"Retrieval from {source} memory after {STORAGE:g} µs storage"
-    fig.suptitle(title + "\n" + subtitle)
+    fig.suptitle(title + "\n" + subtitle + (" — shaded sampled tolerance ranges" if bands else ""))
     fig.canvas.manager.set_window_title(title)
     if _ASSISTANT_OUTPUT:
         names = ("transmon_e", "cavity_mean_photons", "atom_h0", "atom_h1",
@@ -1189,12 +1220,14 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
                       "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",
                       "fidelity_definition": "Unconditional joint target overlap; fixed noiseless phase; no postselection.",
                       "basis_evaluation": "After storage and retrieval; independent atomic inputs unless roundtrip."},
-            summary={"displayed_metrics": summary_rows if not roundtrip else summary_lines,
+            summary={"tolerance_ranges": bands["summary"] if bands else None,
+                     "displayed_metrics": summary_rows if not roundtrip else summary_lines,
                      "selected_joint_fidelity": float(joint[-1]), "selected_raw_transmon_overlap": float(raw[-1]),
                      "selected_phase_corrected_transmon_overlap": float(corrected[-1]),
                      "selected_transmon_coherence": float(coherence[-1]),
                      "atomic_joint_before_retrieval_if_roundtrip": atomic_joint},
-            traces={"selected_input_dynamics": trace(ts, joint_fidelity=joint,
+            traces={**tolerance_bands.report_traces(bands),
+                    "selected_input_dynamics": trace(ts, joint_fidelity=joint,
                         raw_transmon_overlap=raw, phase_corrected_transmon_overlap=corrected,
                         transmon_coherence_2abs_rho_g_e=coherence, **dict(zip(names, output_pops))),
                     "controls": trace(ts, flux_Phi_over_Phi0=[flux_read(t) for t in ts],
@@ -1553,6 +1586,7 @@ if __name__ == "__main__":
         launch(backend_path=Path(__file__).resolve())
         raise SystemExit(0)
     parser = argparse.ArgumentParser()
+    parser.add_argument("--tolerance-scan", action="store_true", help="Scan fixed +/- tolerances and show sampled best/worst fidelity.")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--leakage-scan", action="store_true")
     parser.add_argument("--retrieve", action="store_true",
@@ -1576,7 +1610,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     _ASSISTANT_OUTPUT = args.assistant_output
     selected_modes = sum((args.paper_figure, args.retrieve, args.roundtrip,
-                          args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only))
+                          args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only, args.tolerance_scan))
     if selected_modes > 1:
         parser.error("Choose one figure mode, or use --all-figures.")
     if args.all_figures and args.check:
@@ -1587,7 +1621,11 @@ if __name__ == "__main__":
           f"atom-cavity={diagnostics['atom_swap_detuning_MHz']:.6g}", flush=True)
     print(f"Calculated g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
           f"g_AC / 2pi: {G_AC/TWOPI:.6g} MHz", flush=True)
-    if args.all_figures or (selected_modes == 0 and not args.check):
+    if args.tolerance_scan:
+        import tolerance_scan
+        tolerance_scan.run(sys.modules[__name__], _SETTINGS, save=args.save,
+                           output_directory=_ASSISTANT_OUTPUT)
+    elif args.all_figures or (selected_modes == 0 and not args.check):
         all_figures(save=args.save)
     elif args.write_only:
         main(check=args.check, save=args.save)

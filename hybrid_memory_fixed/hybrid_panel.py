@@ -40,6 +40,7 @@ MODES = [
 ("Both transfer directions", []),
 ("Transmon to atom", ["--write-only"]),
 ("Atom to transmon", ["--retrieve"]),
+("Tolerance scan: best and worst sampled", ["--tolerance-scan"]),
 ]
 
 
@@ -84,6 +85,11 @@ PARAMETER_SYMBOLS = {
     "INPUT_PHI": r"\varphi",
     "MAX_STEP": r"\Delta t_{\max}",
     "NC": r"N_c",
+    "FC_TOL": r"\epsilon_c",
+    "FT_TOL": r"\epsilon_T",
+    "FA_TOL": r"\epsilon_A",
+    "FLUX_TOL": r"\epsilon_\phi",
+    "EFIELD_TOL": r"\epsilon_E",
 }
 
 # Keep prose labels free of duplicate plain-text versions of typeset symbols.
@@ -169,6 +175,27 @@ SECTION_EQUATIONS = {
         "their pulse intervals. Flux and field use a rounded sin-squared pulse with zero endpoint slopes and no flat hold. "
         "GAP separates operations. Input Bloch angles are entered in degrees. "
         "The nominal resonant time is only a reference. Separate TC and AC multipliers stretch each rounded pulse. RAMP contributes to the reference duration before scaling. Finite pulses still have spectral width. Peak controls can cross resonance twice for coherent transfer; changing device inputs requires recalibration.",
+    ),
+    "Experimental tolerances": (
+        (
+            r"$\delta x\in\{-\epsilon_x,0,+\epsilon_x\},\qquad x\in\{f_c,f_T,f_A,\phi,E\}$",
+            r"$\phi_{\mathrm{actual}}(t)=\phi_{\mathrm{nominal}}(t)+\delta\phi$",
+            r"$E_{\mathrm{actual}}(t)=E_{\mathrm{nominal}}(t)+\delta E$",
+            r"$f_{T,\mathrm{actual}}(t)=f_T(\phi_{\mathrm{actual}}(t))+\delta f_T$",
+            r"$f_{A,\mathrm{actual}}(t)=f_{A,0}+(K_{r1}-K_{r0})E_{\mathrm{actual}}^2(t)+\delta f_A$",
+        ),
+        "Nonzero tolerances automatically add shaded sampled ranges to Both transfer directions, "
+        "Transmon to atom, and Atom to transmon outputs. Each tolerance is a fixed absolute +/- bound, "
+        "not a percentage or random noise. The scan tests all combinations of negative bound, "
+        "zero and positive bound (3^N runs for N nonzero tolerances; up to 243). "
+        "Offsets remain constant through writing, storage and readout. "
+        "Pulse timing, couplings, optical carriers and phase correction keep their nominal calibration. "
+        "Frequency offsets are additional to flux/Stark shifts; avoid counting the same uncertainty twice. "
+        "Summary columns compare nominal values with sampled ranges for all metrics, including logical-input fidelities, coherence and residual populations. "
+        "Best and worst are among sampled points, not guaranteed extrema within the bounds. "
+        "Lines and 3D basis-output columns are nominal; shaded dynamics and With tolerances summary columns "
+        "show sampled error ranges. The separate Tolerance scan output compares final outcomes. "
+        "Flux errors can cross a SQUID sweet spot; the periodic flux relation is used without clipping.",
     ),
     "Numerics": (
         (
@@ -520,7 +547,9 @@ class ParameterPanel:
                     self.append(value)
                     if self.last_run is not None:
                         self.last_run["output"]=(self.last_run["output"]+value)[-3000:]
-                        if value.startswith("Assistant numerical report ready:"):
+                        if value.startswith("Full tolerance results:"):
+                            self.numerical_status.set("Tolerance scan results available. Files: "+self.last_run["output_directory"])
+                        elif value.startswith("Assistant numerical report ready:"):
                             self.numerical_status.set("Numerical plot data is available. Ask now, even while plot windows remain open. "
                                                       "Files: "+self.last_run["output_directory"])
                 elif kind in ("codex_ready","codex_error"):
@@ -544,7 +573,7 @@ class ParameterPanel:
                     if self.last_run is not None:
                         self.last_run["status"]="finished" if value==0 else "stopped or failed"
                         folder=Path(self.last_run["output_directory"])
-                        available=[name for name in ("write","read","roundtrip") if (folder/(name+".json")).is_file()]
+                        available=[name for name in ("write","read","roundtrip","tolerance_scan") if (folder/(name+".json")).is_file()]
                         self.numerical_status.set("Numerical reports available: "+", ".join(available)+". Files: "+str(folder)
                                                   if available else "No numerical reports were produced for this run. See the calculation log.")
                     self.status.set("Run finished. Edit parameters and run again." if value==0

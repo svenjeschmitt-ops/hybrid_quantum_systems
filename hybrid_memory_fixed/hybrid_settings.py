@@ -47,6 +47,11 @@ FIELDS = [
 ("Pulses and input state","STORAGE","Memory storage duration","us",5.0,"nonnegative"),
 ("Pulses and input state","INPUT_THETA","Input Bloch polar angle","degrees",90.0,"free"),
 ("Pulses and input state","INPUT_PHI","Input relative phase","degrees",60.0,"free"),
+("Experimental tolerances","FC_TOL","Cavity frequency tolerance (+/-)","MHz",0.0,"nonnegative"),
+("Experimental tolerances","FT_TOL","Transmon frequency tolerance (+/-)","MHz",0.0,"nonnegative"),
+("Experimental tolerances","FA_TOL","Atomic transition frequency tolerance (+/-)","MHz",0.0,"nonnegative"),
+("Experimental tolerances","FLUX_TOL","Applied flux tolerance (+/-)","Phi/Phi0",0.0,"nonnegative"),
+("Experimental tolerances","EFIELD_TOL","Total electric field tolerance (+/-)","V/cm",0.0,"nonnegative"),
 ("Numerics","MAX_STEP","Maximum solver time step","us",0.0005,"positive"),
 ("Numerics","NC","Number of cavity Fock states","integer",3,"integer"),
 ]

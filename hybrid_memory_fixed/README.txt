@@ -256,3 +256,55 @@ run in background workers so the panel remains usable.
 Check the assistant without making network requests:
   python -m unittest discover -s hybrid_memory_fixed -p 'test_*assistant.py'
   python -m unittest discover -s hybrid_memory_fixed -p 'test_simulation_output.py'
+
+Fixed experimental tolerances:
+The Experimental tolerances tab accepts absolute +/- bounds FC_TOL, FT_TOL,
+FA_TOL (MHz), FLUX_TOL (Phi/Phi0), and EFIELD_TOL (V/cm). Defaults are zero.
+Nonzero tolerances automatically add shaded sampled ranges to the ordinary
+Both transfer directions, Transmon to atom and Atom to transmon figures.
+The separate 'Tolerance scan: best and worst sampled' output compares final results.
+CLI: python hybrid_memory_fixed/backend.py --tolerance-scan --config settings.json
+Use --no-show for unattended runs; --save also exports the summary plot.
+
+The scan tests all combinations of -bound, zero and +bound for each nonzero
+axis: 3^N points, up to 243. Each error remains fixed throughout a scenario.
+Flux and total-field errors apply at park and during both transfer pulses;
+field error is an uncompensated residual, not a changed voltage command.
+The flux relation remains periodic and is not clipped at the nominal 0-0.5
+input range. FT_TOL and FA_TOL add residual transition-frequency shifts on top
+of flux/Stark shifts; avoid double-counting one physical source of error.
+FC_TOL shifts cavity photon energy in the fixed nominal rotating frame.
+Optical carriers, couplings, pulse timings and noiseless phase corrections
+retain their nominal calibration. There is no random sampling or per-point
+retuning. Dissipation remains enabled and separate from these static errors.
+
+The chart and console show nominal, best sampled and worst sampled joint
+fidelities for the selected Bloch-angle input, independently for write+storage
+and storage+read. Read starts from an independently prepared atomic input.
+These are NOT guaranteed global extrema or statistical confidence bounds:
+interior/off-grid extrema can be missed. Different directions may have their
+best/worst at different offsets. All offsets and results are saved automatically
+to a unique output/tolerance_runs folder (or the panel's run report folder),
+in tolerance_scan.json.
+
+Ordinary transfer figures show nominal population/control lines with shaded
+sampled pointwise min/max ranges. Summary tables have Metric, Nominal and
+With tolerances columns. Outcome metrics have sampled min/max ranges, including
+the three logical-input fidelities, selected-input coherence and residual
+populations. Write end-state metrics include storage; read includes storage
+before retrieval. All input fidelities use the fixed nominal phase reference.
+Pulse timings remain fixed, so their tolerance cells show a dash.
+Combined populations are summed within each realization before taking extrema.
+The nominal comparison retains configured loss and dephasing. Basis-output
+columns in the 3D plot remain nominal. Exported write fidelity
+traces end before storage; the summary uses the final state after the
+storage hold. Read trajectories include the hold before retrieval time zero.
+The detuning bands subtract the ACTUAL cavity frequency, including FC error.
+Electrode voltage is the commanded voltage and does not change with residual
+field error; that error affects field, Stark detunings and quantum dynamics.
+A pointwise envelope can switch between different fixed-error realizations;
+it is not one physical trajectory, a confidence interval or a guaranteed bound.
+Panel numerical reports include full-resolution selected_input_tolerance_ranges
+traces and the final best/worst offsets under summary.tolerance_ranges.
+With zero tolerances, no extra simulations are run and outcome intervals
+collapse to their nominal values; timing cells still show a dash.
