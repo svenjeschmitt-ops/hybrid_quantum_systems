@@ -99,22 +99,26 @@ def transmon_frequency(phi):
     )
     return np.sqrt(8 * EC * ej) - EC
 
-# Stage boundaries; swap hold times are nominal, not numerically optimized.
+# Calibrated multipliers stretch the rounded TC and AC pulses independently.
+# Rounded controls reach the interaction point only at the pulse midpoint;
+# pi/(2*g) is a reference time, not a resonant flat hold or guaranteed swap.
 PREP = (0.0, T_OPT)
-TC = (PREP[1] + GAP, PREP[1] + GAP + 2 * RAMP + np.pi / (2 * G_TC))
-AC = (TC[1] + GAP, TC[1] + GAP + 2 * RAMP + np.pi / (2 * G_AC))
+TC_DURATION = _SETTINGS["TC_PULSE_SCALE"] * (2 * RAMP + np.pi / (2 * G_TC))
+AC_DURATION = _SETTINGS["AC_PULSE_SCALE"] * (2 * RAMP + np.pi / (2 * G_AC))
+TC = (PREP[1] + GAP, PREP[1] + GAP + TC_DURATION)
+AC = (TC[1] + GAP, TC[1] + GAP + AC_DURATION)
 MAP = (AC[1] + GAP, AC[1] + GAP + T_OPT)
 T_END = MAP[1] + STORAGE
 
 def smooth_window(t, start, end):
-    """Raised-cosine ramps with a flat central plateau."""
+    """One sin-squared excursion, with zero value and slope at both ends.
+
+    This finite pulse has a nonzero spectral width; it is not a continuous
+    single-frequency drive. The full interval sets its rise and fall time.
+    """
     if t <= start or t >= end:
         return 0.0
-    if t < start + RAMP:
-        return 0.5 * (1 - np.cos(np.pi * (t - start) / RAMP))
-    if t > end - RAMP:
-        return 0.5 * (1 - np.cos(np.pi * (end - t) / RAMP))
-    return 1.0
+    return float(np.sin(np.pi * (t - start) / (end - start))**2)
 
 def optical_envelope(t, start, end):
     if start < t < end:
@@ -236,6 +240,7 @@ def time_grid(include_storage=True):
     points = [np.linspace(0, MAP[1], 1801)]
     for interval in (PREP, TC, AC, MAP):
         points.append(np.asarray(interval))
+    points.append(np.asarray([sum(TC) / 2, sum(AC) / 2]))
     if include_storage:
         points.append(np.linspace(MAP[1], T_END, 301))
     return np.unique(np.concatenate(points))
@@ -477,8 +482,8 @@ def main(check=False, save=False):
         ["Total write time (preparation through mapping)", f"{MAP[1] * 1000:.2f} ns"],
         ["Storage hold after writing", f"{STORAGE:g} µs"],
         ["Total write + storage duration", f"{MAP[1] + STORAGE:.6g} µs"],
-        ["Transmon–cavity hold (excluding ramps)", f"{np.pi / (2 * G_TC) * 1000:.2f} ns"],
-        ["Cavity–atom hold (excluding ramps)", f"{np.pi / (2 * G_AC) * 1000:.2f} ns"],
+        ["Transmon–cavity rounded pulse", f"{(TC[1] - TC[0]) * 1000:.2f} ns"],
+        ["Cavity–atom rounded pulse", f"{(AC[1] - AC[0]) * 1000:.2f} ns"],
         ["Joint fidelity: g → h0", f"{input_fidelities[0]:.2%}"],
         ["Joint fidelity: e → h1", f"{input_fidelities[1]:.2%}"],
         ["Joint fidelity: + → +", f"{input_fidelities[2]:.2%}"],
@@ -704,6 +709,7 @@ def retrieval_model(source="hyperfine"):
                    ("Return atom to h0", cleanup)])
     points = [np.linspace(0, cleanup[1], 1801)]
     points.extend(np.asarray(interval) for _, interval in stages)
+    points.append(np.asarray([sum(tc) / 2, sum(ac) / 2]))
     return h_read, np.unique(np.concatenate(points)), stages, flux_read, voltage_read
 
 
@@ -1066,8 +1072,8 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             ["Storage hold before readout", f"{STORAGE:g} µs"],
             ["Readout duration (including optical operations)", f"{ts[-1] * 1000:.2f} ns"],
             ["Total storage + readout duration", f"{STORAGE + ts[-1]:.6g} µs"],
-            ["Atom–cavity hold (excluding ramps)", f"{np.pi / (2 * G_AC) * 1000:.2f} ns"],
-            ["Cavity–transmon hold (excluding ramps)", f"{np.pi / (2 * G_TC) * 1000:.2f} ns"],
+            ["Atom–cavity rounded pulse", f"{(AC[1] - AC[0]) * 1000:.2f} ns"],
+            ["Cavity–transmon rounded pulse", f"{(TC[1] - TC[0]) * 1000:.2f} ns"],
             [f"Joint fidelity: {pair[0]} → g", f"{input_fidelities[0]:.2%}"],
             [f"Joint fidelity: {pair[1]} → e", f"{input_fidelities[1]:.2%}"],
             ["Joint fidelity: + → +", f"{input_fidelities[2]:.2%}"],
@@ -1520,7 +1526,7 @@ if __name__ == "__main__":
     if args.all_figures and args.check:
         parser.error("--check runs verification separately from --all-figures.")
     diagnostics = derived(_SETTINGS)
-    print(f"Swap plateau detuning (MHz): "
+    print(f"Pulse-peak detuning (MHz): "
           f"transmon-cavity={diagnostics['transmon_swap_detuning_MHz']:.6g}; "
           f"atom-cavity={diagnostics['atom_swap_detuning_MHz']:.6g}", flush=True)
     print(f"Calculated g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "

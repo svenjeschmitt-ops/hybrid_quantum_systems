@@ -74,6 +74,8 @@ PARAMETER_SYMBOLS = {
     "TPHI_H": r"T_{\phi,H}",
     "OMEGA": r"\Omega_{\max}/(2\pi)",
     "RAMP": r"T_{\mathrm{ramp}}",
+    "TC_PULSE_SCALE": r"s_{TC}",
+    "AC_PULSE_SCALE": r"s_{AC}",
     "GAP": r"T_{\mathrm{gap}}",
     "STORAGE": r"T_{\mathrm{storage}}",
     "INPUT_THETA": r"\vartheta",
@@ -120,7 +122,7 @@ SECTION_EQUATIONS = {
         ),
         "Energies divided by h are entered in MHz. d is SQUID junction asymmetry. "
         "Interaction and parked flux inputs use 0 ≤ flux / flux quantum ≤ 0.5. The applied interaction flux sets the calculated transmon frequency independently of f_c. Resonance requires f_T,int = f_c; coupling sets the nominal swap hold. "
-        "w_TC(t) is zero outside the interaction pulse and one during its flat hold, with raised-cosine ramps. The parked flux sets idle detuning to suppress unwanted exchange while coupling remains active.",
+        "w_TC(t) is a sin-squared excursion, zero outside the pulse and one only at its midpoint. The parked flux sets idle detuning to suppress unwanted exchange while coupling remains active.",
     ),
     "Coupling parameters": (
         (
@@ -157,14 +159,14 @@ SECTION_EQUATIONS = {
     "Pulses and input state": (
         (
             r"$\Omega(t)=\Omega_{\max}\sin^2\!\left(\frac{\pi(t-t_0)}{T_{\mathrm{opt}}}\right),\quad \int_{t_0}^{t_0+T_{\mathrm{opt}}}\Omega(t)\,dt=\pi,\quad T_{\mathrm{opt}}=\frac{2\pi}{\Omega_{\max}}$",
-            r"$t_{\mathrm{hold},TC}=\frac{\pi}{2g_{TC}},\qquad t_{\mathrm{hold},AC}=\frac{\pi}{2g_{AC}},\qquad T_{\mathrm{swap}}=2T_{\mathrm{ramp}}+t_{\mathrm{hold}}$",
-            r"$w_{\mathrm{rise}}(u)=\frac{1-\cos(\pi u/T_{\mathrm{ramp}})}{2},\qquad 0\leq u\leq T_{\mathrm{ramp}}$",
+            r"$t_{\mathrm{ref},j}=\frac{\pi}{2g_j},\qquad T_j=s_j(2T_{\mathrm{ramp}}+t_{\mathrm{ref},j}),\quad j=TC,AC$",
+            r"$w(u)=\sin^2(\pi u/T_{\mathrm{swap}}),\quad 0\leq u\leq T_{\mathrm{swap}};\qquad w=0\ \mathrm{outside}$",
             r"$|\psi_T\rangle=\cos(\vartheta/2)|g\rangle+e^{i\varphi}\sin(\vartheta/2)|e\rangle,\qquad t_{\mathrm{end}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
         ),
         "Times are in μs. Optical envelopes vanish outside "
-        "their pulse intervals. Ramps use a raised cosine, a flat hold, and a reversed falling ramp. "
+        "their pulse intervals. Flux and field use a rounded sin-squared pulse with zero endpoint slopes and no flat hold. "
         "GAP separates operations. Input Bloch angles are entered in degrees. "
-        "Swap holds are nominal isolated, resonant values.",
+        "The nominal resonant time is only a reference. Separate TC and AC multipliers stretch each rounded pulse. RAMP contributes to the reference duration before scaling. Finite pulses still have spectral width. Peak controls can cross resonance twice for coherent transfer; changing device inputs requires recalibration.",
     ),
     "Numerics": (
         (
@@ -322,8 +324,8 @@ class ParameterPanel:
         self.swap_rates.set(
             f"Nominal resonant swap frequencies: TC {d['transmon_swap_frequency_MHz']:.5g} MHz; "
             f"AC {d['atom_swap_frequency_MHz']:.5g} MHz.\n"
-            f"Nominal resonant holds: TC {d['transmon_swap_hold_us']:.5g} us; "
-            f"AC {d['atom_swap_hold_us']:.5g} us.")
+            f"Rounded pulse durations: TC {d['transmon_pulse_duration_us']:.5g} us; "
+            f"AC {d['atom_pulse_duration_us']:.5g} us.")
 
     def config(self):
         return validate({key:value.get() for key,value in self.entries.items()})
