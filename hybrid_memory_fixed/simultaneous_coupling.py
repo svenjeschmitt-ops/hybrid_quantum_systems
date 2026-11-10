@@ -4,6 +4,7 @@ Frequencies are MHz, angular couplings rad/us, times us. The full cavity
 remains explicit: no direct transmon-atom exchange term is introduced.
 """
 import numpy as np
+import simulation_progress as progress
 import qutip as qt
 
 from hybrid_settings import validate, coupling_strengths
@@ -140,7 +141,9 @@ def simulate(b, alpha, beta, noisy=True, include_storage=True, storage_solver=No
 
 def run(b, save=False):
     """Panel output: populations, controls, joint fidelity and logical inputs."""
+    progress.update(0, "Calibrating simultaneous resonance")
     _, calibration, _ = simulate(b, 1, 1, noisy=False, include_storage=False)
+    progress.update(.15, "Calculating simultaneous dynamics and storage")
     phase = float(np.angle(calibration[-1].ptrace(2)[0, 1]))
     rotation = b.memory_rotation(phase)
     theta, phi = np.deg2rad([b._SETTINGS['INPUT_THETA'], b._SETTINGS['INPUT_PHI']])
@@ -156,7 +159,9 @@ def run(b, save=False):
     pops = dict(zip(names, np.real(qt.expect(operators, states))))
     basis = []
     output_states = [qt.tensor(b.g, qt.basis(b.NC, 0), atom) for atom in (b.h0, b.h1)]
+    progress.update(.40, "Calculating simultaneous logical inputs")
     for label, x, y in (('g to h0', 1, 0), ('e to h1', 0, 1), ('+ to +', 1/np.sqrt(2), 1/np.sqrt(2))):
+        progress.update(.40+.5*len(basis)/3, f'Simultaneous input {len(basis)+1}/3')
         print(f'Calculating simultaneous-resonance input {label}…', flush=True)
         _, trajectory, _ = simulate(b, x, y, storage_solver=storage_solver)
         goal = qt.tensor(b.g, qt.basis(b.NC, 0), rotation.dag()*(x*b.h0+y*b.h1))
@@ -171,6 +176,7 @@ def run(b, save=False):
     summary = dict(joint_fidelity_after_mapping=float(fidelity[index]),
                    joint_fidelity_after_storage=float(fidelity[-1]), calibrated_phase_rad=phase,
                    **{k: v for k, v in info.items() if k != 'stages'})
+    progress.update(.90, 'Building simultaneous resonance figure')
     print('Simultaneous shared-cavity resonance (nominal controls; no tolerance scan).', flush=True)
     print(f"Resonant flux={info['resonant_flux']:.9g}; voltage={info['resonant_voltage_V']:.9g} V", flush=True)
     print(f"g_TC/2pi={info['g_TC_rad_per_us']/b.TWOPI:.6g} MHz; g_AC/2pi={info['g_AC_rad_per_us']/b.TWOPI:.6g} MHz", flush=True)

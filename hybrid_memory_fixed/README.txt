@@ -411,3 +411,12 @@ Simultaneous resonance tab. Calculated/manual coupling selection and manual
 strengths are retained. Turning the toggle off selects sequential writing.
 If parameter sweeping was on, enabling simultaneous resonance turns it off
 and reports this in the status line. Click Run simulation when ready.
+
+Simulation progress:
+The panel shows a 0–100% bar based on completed calculation stages, including
+logical inputs, tolerance scenarios, transfer directions and sweep points.
+Stages are weighted work units, not a wall-clock estimate; a percentage can
+pause during a long solver call. The bar reaches 100% when results and figures
+are ready, before blocking plot windows close. New runs reset it to zero.
+Stopping or failing a calculation preserves its last percentage.
+CLI --progress emits structured HYBRID_PROGRESS events for panel consumption.

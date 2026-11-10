@@ -9,6 +9,7 @@ Summary only: python backend.py --paper-figure
 Check: python backend.py --check
 """
 import argparse
+import os
 import sys
 import json
 from functools import lru_cache
@@ -20,6 +21,7 @@ import qutip as qt
 from pathlib import Path
 from simulation_output import trace, write_report
 import tolerance_bands
+import simulation_progress as progress
 
 _ASSISTANT_OUTPUT = None
 
@@ -356,6 +358,7 @@ def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None, s
             labels.append(label)
             rows.append(row)
             fidelities.append(fidelity)
+            progress.update((index+1)/3, f"{mode.capitalize()} logical input {index+1}/3 complete")
     return labels, np.asarray(rows), np.asarray(fidelities)
 
 
@@ -396,7 +399,10 @@ def plot_wrong_population(ax, cases, xlabel):
 
 
 def main(check=False, save=False):
+    work=progress.transfer_stages(_SETTINGS)
+    progress.update(0, "Calibrating write phase")
     phase = calibrated_phase()
+    progress.update(work["calibration"], "Calculating write dynamics")
     U = memory_rotation(phase)
 
     # Nonzero input phase checks coherent transfer.
@@ -443,12 +449,16 @@ def main(check=False, save=False):
         print("Physical-state checks passed.")
         return
 
+    progress.update(work["selected"], "Calculating storage")
     held_state = hold_memory(states[-1])
     held_fidelity = float(np.real(qt.expect(atomic_storage_effect(transfer_target, phase), held_state)))
-    labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase, storage=True)
-    bands = tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "write", alpha, beta,
-                                    phase, ts, pops, fidelity, held_fidelity,
-                                    nominal_state=held_state, nominal_basis=input_fidelities)
+    with progress.scope(work["storage"], work["basis"], "Write logical inputs"):
+        labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase, storage=True)
+    with progress.scope(work["basis"], .95, "Write tolerance scenarios"):
+        bands = tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "write", alpha, beta,
+                                        phase, ts, pops, fidelity, held_fidelity,
+                                        nominal_state=held_state, nominal_basis=input_fidelities)
+    progress.update(.95, "Building write figure")
     summary_row = 2
     fig = plt.figure(figsize=(12, 10), layout="constrained")
     grid = fig.add_gridspec(summary_row + 1, 2)
@@ -1015,9 +1025,12 @@ def plot_storage_fidelity(ax, save=False):
 
 
 def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False):
+    work=progress.transfer_stages(_SETTINGS)
+    progress.update(0, "Calibrating read phase")
     if roundtrip and source != "hyperfine":
         raise ValueError("Round trip retrieves from hyperfine memory.")
     phase = read_phase(source, roundtrip)
+    progress.update(work["calibration"], "Calculating storage and read dynamics")
     theta = np.deg2rad(parameter("INPUT_THETA", 90.0))
     phi = np.deg2rad(parameter("INPUT_PHI", 60.0))
     alpha = np.cos(theta / 2)
@@ -1079,13 +1092,16 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     # The round trip uses only the complete state after writing and storage.
     cases = [("After writing and storage" if roundtrip else
               f"Atomic input after {STORAGE:g} µs storage", ts, states, corrected, joint)]
-    labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
+    with progress.scope(work["storage"], work["basis"], "Read logical inputs"):
+        labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
     nominal_pops = np.real([qt.expect(op, states) for op in
                             (Pe, n, Ph0, Ph1, Pr0, Pr1, Plost, Pwrong)])
-    bands = (tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "read", alpha, beta,
-                                     phase, ts, nominal_pops, joint, joint[-1], source,
-                                     nominal_state=rho_final, nominal_basis=input_fidelities)
-             if not roundtrip else None)
+    with progress.scope(work["basis"], .95, "Read tolerance scenarios"):
+        bands = (tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "read", alpha, beta,
+                                         phase, ts, nominal_pops, joint, joint[-1], source,
+                                         nominal_state=rho_final, nominal_basis=input_fidelities)
+                 if not roundtrip else None)
+    progress.update(.95, "Building read figure")
     summary_row = 2
     fig = plt.figure(figsize=(12, 10), layout="constrained")
     grid = fig.add_gridspec(summary_row + 1, 2)
@@ -1581,7 +1597,8 @@ def all_figures(save=False):
     ]
     for index, (name, build) in enumerate(jobs, start=1):
         print(f"Generating figure {index}/{len(jobs)}: {name}", flush=True)
-        build()
+        with progress.scope((index-1)/len(jobs), index/len(jobs), name):
+            build()
     count = len(plt.get_fignums())
     print(f"All {count} figures are ready. Close their windows to finish.", flush=True)
 
@@ -1592,6 +1609,7 @@ if __name__ == "__main__":
         launch(backend_path=Path(__file__).resolve())
         raise SystemExit(0)
     parser = argparse.ArgumentParser()
+    parser.add_argument("--progress", action="store_true", help="Emit structured panel progress.")
     parser.add_argument("--parameter-sweep", action="store_true", help="Sweep one model input and compare write/read fidelities.")
     parser.add_argument("--sweep-parameter", default="PHI_SWAP")
     parser.add_argument("--sweep-start", type=float, default=0.26)
@@ -1622,6 +1640,8 @@ if __name__ == "__main__":
     parser.add_argument("--assistant-output", help="Directory for run-specific numerical assistant reports.")
     parser.add_argument("--write-only", action="store_true", help="Only the transmon-to-atom transfer figure.")
     args = parser.parse_args()
+    progress.enable(args.progress or os.environ.get("HYBRID_SIM_PROGRESS")=="1")
+    progress.update(0, "Preparing simulation")
     _ASSISTANT_OUTPUT = args.assistant_output
     selected_modes = sum((args.paper_figure, args.retrieve, args.roundtrip,
                           args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only, args.tolerance_scan, args.simultaneous, args.parameter_sweep, bool(args.sweep_point)))
@@ -1673,6 +1693,7 @@ if __name__ == "__main__":
     else:
         main(args.check, save=args.save)
 
+    progress.update(1, "Simulation ready", complete=True)
     if not args.no_show and not args.check:
         # Blocking interactive windows: close the windows to finish the run.
         plt.show(block=True)

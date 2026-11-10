@@ -37,6 +37,7 @@ from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from hybrid_settings import FIELDS, DEFAULTS, validate, derived
 from parameter_sweep import SWEEP_FIELDS, sweep_configs
+from simulation_progress import parse_line as parse_progress_line
 from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
@@ -367,8 +368,13 @@ class ParameterPanel:
         self.stop_button.pack(side="right",padx=6)
         self.status=tk.StringVar(value="Ready. Default parameters are illustrative, not an experimentally validated design.")
         ttk.Label(outer,textvariable=self.status,wraplength=940).pack(anchor="w",pady=4)
-        self.log=tk.Text(outer,height=4,wrap="word",state="disabled")
-        self.log.pack(fill="x")
+        progress_row=ttk.Frame(outer)
+        progress_row.pack(fill="x",pady=(3,6))
+        self.progress=tk.DoubleVar(value=0)
+        self.progress_label=tk.StringVar(value="0%")
+        self.progress_bar=ttk.Progressbar(progress_row,mode="determinate",maximum=100,variable=self.progress)
+        self.progress_bar.pack(side="left",fill="x",expand=True)
+        ttk.Label(progress_row,textvariable=self.progress_label,width=6,anchor="e").pack(side="right",padx=(8,0))
         for value in self.entries.values():
             value.trace_add("write",self.update_swap_rates)
         self.mode.trace_add("write",self.sync_simultaneous_mode)
@@ -656,10 +662,8 @@ class ParameterPanel:
         return validate({key:value.get() for key,value in self.entries.items()})
 
     def append(self,text):
-        self.log.configure(state="normal")
-        self.log.insert("end",text)
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        if self.last_run is not None:
+            self.last_run["output"]=(self.last_run["output"]+text)[-3000:]
 
     def reset(self):
         self.sweep_enabled.set("Off")
@@ -739,7 +743,7 @@ class ParameterPanel:
             return
         # An explicit --run bypasses the startup panel in the child.
         command=[sys.executable,"-u",str(self.backend_path),
-                 "--run","--config",str(self.temp_path),"--assistant-output",report_directory,*mode_args]
+                 "--run","--progress","--config",str(self.temp_path),"--assistant-output",report_directory,*mode_args]
         if self.save.get():
             command.append("--save")
         try:
@@ -749,6 +753,8 @@ class ParameterPanel:
             self.temp_path.unlink(missing_ok=True)
             messagebox.showerror("Could not start simulation",str(exc))
             return
+        self.progress.set(0)
+        self.progress_label.set("0%")
         self.run_button.configure(state="disabled")
         self.last_run={"settings":run_config,"mode":self.mode.get(),"status":"running","output":"",
                        "output_directory":report_directory}
@@ -767,14 +773,28 @@ class ParameterPanel:
             self.events.put(("line",line))
         self.events.put(("done",process.wait()))
 
+    def handle_progress(self,line):
+        event=parse_progress_line(line)
+        if event is None:
+            return False
+        percent=max(self.progress.get(),event["percent"])
+        self.progress.set(percent)
+        self.progress_label.set(f"{int(percent)}%")
+        if self.last_run is not None:
+            self.last_run["progress_percent"]=percent
+        self.status.set("100% — simulation ready. Close plot windows to finish the run." if percent>=100
+                        else "Calculating: "+event["label"])
+        return True
+
     def poll(self):
         try:
             while True:
                 kind,value=self.events.get_nowait()
                 if kind=="line":
+                    if self.handle_progress(value):
+                        continue
                     self.append(value)
                     if self.last_run is not None:
-                        self.last_run["output"]=(self.last_run["output"]+value)[-3000:]
                         if value.startswith("Full parameter sweep results:"):
                             self.numerical_status.set("Parameter sweep results available. Files: "+self.last_run["output_directory"])
                         elif value.startswith("Full tolerance results:"):
@@ -800,14 +820,17 @@ class ParameterPanel:
                             self.assistant_append("\n")
                         self.assistant_status.set(text)
                 elif kind=="done":
+                    if value==0:
+                        self.progress.set(100)
+                        self.progress_label.set("100%")
                     if self.last_run is not None:
                         self.last_run["status"]="finished" if value==0 else "stopped or failed"
                         folder=Path(self.last_run["output_directory"])
                         available=[name for name in ("write","read","roundtrip","tolerance_scan","parameter_sweep") if (folder/(name+".json")).is_file()]
                         self.numerical_status.set("Numerical reports available: "+", ".join(available)+". Files: "+str(folder)
-                                                  if available else "No numerical reports were produced for this run. See the calculation log.")
+                                                  if available else "No numerical reports were produced for this run.")
                     self.status.set("Run finished. Edit parameters and run again." if value==0
-                                    else "Run stopped or failed. See the calculation log.")
+                                    else "Run stopped or failed.")
                     self.run_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
                     if self.temp_path:

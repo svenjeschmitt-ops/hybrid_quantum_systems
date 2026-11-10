@@ -12,6 +12,7 @@ from datetime import datetime
 import uuid
 
 from hybrid_settings import FIELDS, validate, derived
+import simulation_progress as progress
 
 SWEEP_FIELDS = [row for row in FIELDS
                 if row[0] not in ('Experimental tolerances', 'Simultaneous resonance', 'Numerics')
@@ -74,13 +75,14 @@ def evaluate_point(b, directions):
     try:
         with tempfile.TemporaryDirectory(prefix='hybrid-sweep-report-') as directory:
             b._ASSISTANT_OUTPUT = directory
-            for direction in directions:
+            for direction_index, direction in enumerate(directions):
                 previous_figures = set(plt.get_fignums())
                 try:
-                    if direction == 'write':
-                        b.main(save=False)
-                    else:
-                        b.retrieval_main(save=False)
+                    with progress.scope(direction_index/len(directions), (direction_index+1)/len(directions), direction):
+                        if direction == 'write':
+                            b.main(save=False)
+                        else:
+                            b.retrieval_main(save=False)
                     payload = json.loads((Path(directory)/(direction+'.json')).read_text())
                 finally:
                     for number in set(plt.get_fignums()) - previous_figures:
@@ -163,7 +165,8 @@ def run(backend, config, parameter, start, stop, step, direction='both',
                     command = [sys.executable, '-u', str(Path(backend.__file__).resolve()),
                                '--run', '--config', str(config_path), '--sweep-point', str(point_path),
                                '--sweep-direction', direction, '--no-show']
-                    env = {**os.environ, 'MPLBACKEND': 'Agg'}
+                    env = {**os.environ, 'MPLBACKEND': 'Agg',
+                           **progress.child_environment(.95*index/len(points), .95*(index+1)/len(points))}
                     subprocess.run(command, check=True, env=env)
                 data = json.loads(point_path.read_text(encoding='utf-8'))
                 row = {parameter: value, **{d+'_fidelity': data['directions'][d]['final_fidelity'] for d in directions}}
@@ -175,6 +178,7 @@ def run(backend, config, parameter, start, stop, step, direction='both',
                 csv_file.flush()
                 report['results'].append({**row, 'data_file': point_path.name})
                 atomic_json(summary_path, report)
+                progress.update(.95*(index+1)/len(points), f'Sweep point {index+1}/{len(points)} complete')
                 print('  '+', '.join(f'{d}={100*row[d+"_fidelity"]:.6f}%' for d in directions), flush=True)
     except BaseException:
         report['status'] = 'incomplete'
@@ -184,6 +188,7 @@ def run(backend, config, parameter, start, stop, step, direction='both',
         signal.signal(signal.SIGTERM, previous_handler)
     report['status'] = 'complete'
     atomic_json(summary_path, report)
+    progress.update(.95, "Building sweep figures")
     from sweep_figure import SweepFigure
     for d in directions:
         viewer = SweepFigure(backend, report, folder, d)

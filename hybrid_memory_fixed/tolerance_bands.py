@@ -1,5 +1,6 @@
 """Pointwise static-error envelopes for the ordinary transfer figures."""
 import numpy as np
+import simulation_progress as progress
 
 from simulation_output import trace
 from tolerance_scan import AXES, fixed_offsets, scenarios
@@ -64,9 +65,10 @@ def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
     print(f'{mode}: calculating tolerance bands for {len(points)} fixed-error points. '
           'Lines are nominal; shaded bands are sampled pointwise ranges.', flush=True)
     ops = (b.Pe, b.n, b.Ph0, b.Ph1, b.Pr0, b.Pr1, b.Plost, b.Pwrong)
+    progress.update(0, "Nominal tolerance scenario complete")
     for index, offsets in enumerate(points[1:], start=2):
         print(f'{mode} tolerance point {index}/{len(points)}: {offsets}', flush=True)
-        with fixed_offsets(b, offsets):
+        with progress.scope((index-2)/(len(points)-1), (index-1)/(len(points)-1), f"Tolerance scenario {index}/{len(points)}"), fixed_offsets(b, offsets):
             if mode == 'write':
                 grid, states = b.simulate(alpha, beta, noisy=True, include_storage=False)
                 effect = b.atomic_storage_effect(target, phase)
@@ -81,7 +83,8 @@ def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
                 final = float(fidelity[-1])
             if not np.array_equal(grid, times):
                 raise ValueError('Tolerance trajectories must share the nominal time grid.')
-            _, _, basis = b.basis_probabilities(mode, source=source, phase=phase, storage=(mode == 'write'))
+            with progress.scope(.5, .95, "Tolerance logical inputs"):
+                _, _, basis = b.basis_probabilities(mode, source=source, phase=phase, storage=(mode == 'write'))
             metrics = final_metrics(b, final_state, mode, final, fidelity[-1], basis)
             sample = dict(populations=np.real([b.qt.expect(op, states) for op in ops]),
                           fidelity=fidelity, **controls(b, times, mode, source))

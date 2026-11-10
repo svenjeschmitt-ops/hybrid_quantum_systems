@@ -7,6 +7,7 @@ from pathlib import Path
 import uuid
 
 import numpy as np
+import simulation_progress as progress
 
 from hybrid_settings import validate
 
@@ -86,15 +87,19 @@ def run(backend, config, save=False, output_directory=None):
           "not guaranteed bounds. Ordinary transfer plots also show sampled tolerance bands.", flush=True)
     with fixed_offsets(b, {axis: 0.0 for axis, _, _ in AXES}):
         print("Computing fixed nominal phase references...", flush=True)
+        progress.update(0, "Calibrating tolerance scan")
         phases = (b.calibrated_phase(), b.read_phase())
+        progress.update(.10, "Tolerance scan calibrated")
     results = []
     for index, offsets in enumerate(points):
         print(f"Tolerance point {index + 1}/{len(points)}: {offsets}", flush=True)
         with fixed_offsets(b, offsets):
             values = evaluate(b, alpha, beta, phases)
         results.append({"offsets": offsets, **values})
+        progress.update(.10+.85*(index+1)/len(points), f"Tolerance scenario {index+1}/{len(points)} complete")
         print(f"  write+storage={values['write_fidelity']:.8f}; "
               f"storage+read={values['read_fidelity']:.8f}", flush=True)
+    progress.update(.95, "Building tolerance summary")
     summary = summarize(results)
     for direction, values in summary.items():
         print(f"\n{direction.upper()}: nominal "
