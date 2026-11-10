@@ -341,8 +341,13 @@ Unattended: add --no-show; numerical exports: add --save.
 Checks: python -m unittest discover -s hybrid_memory_fixed -p 'test_simultaneous.py'
 
 Parameter sweeps:
-Open the Parameter sweep tab, select a parameter (PHI_SWAP by default), set
-start, stop and step, choose both/write/read, then click Run sweep. The current
+In Numerics, find Optional and set Parameter sweep to On. Select a parameter
+(PHI_SWAP by default) and set start, stop and step. Choose Both transfer
+directions, Transmon to atom, or Atom to transmon in Output, then click
+Run simulation. Set Parameter sweep to Off for ordinary single runs. The
+sweep controls are hidden while off; Reset defaults also turns sweeping off.
+Simultaneous resonance and the separate tolerance scan output are available
+while sweeping is off. The current
 inputs in all other tabs form the baseline. PHI_SWAP sweeps the pulse peak;
 PHI_PARK sweeps the parked flux. A negative step runs a descending sweep.
 Points follow start+n*step; stop is included only when reached. All points

@@ -39,7 +39,6 @@ from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
-("Parameter sweep", ["--parameter-sweep"]),
 ("Both transfer directions", []),
 ("Transmon to atom", ["--write-only"]),
 ("Atom to transmon", ["--retrieve"]),
@@ -321,6 +320,8 @@ class ParameterPanel:
                 self.swap_rates=tk.StringVar()
                 ttk.Label(frame,textvariable=self.swap_rates,wraplength=int(width*.4)).grid(
                     row=row+1,column=0,columnspan=3,sticky="w",pady=(12,0))
+            if group == "Numerics":
+                self.build_sweep_controls(frame,row+1,width)
             self.equation_images[group]=tk.PhotoImage(
                 master=root,data=base64.b64encode(section_equations_png(
                     group,dpi=root.winfo_fpixels("1i"),max_width=int(width*.45))).decode("ascii"))
@@ -331,14 +332,14 @@ class ParameterPanel:
             note.grid(row=1,column=0,sticky="ew")
             equations.bind("<Configure>",lambda event,label=note:
                            label.configure(wraplength=max(200,event.width-24)))
-        self.build_sweep_tab()
         self.build_assistant_tab()
         controls=ttk.Frame(outer)
         controls.pack(fill="x")
         ttk.Label(controls,text="Output:").pack(side="left")
         self.mode=tk.StringVar(value="Both transfer directions")
-        ttk.Combobox(controls,textvariable=self.mode,values=[m[0] for m in MODES],
-                     state="readonly",width=56).pack(side="left",padx=8)
+        self.output_selector=ttk.Combobox(controls,textvariable=self.mode,values=[m[0] for m in MODES],
+                                         state="readonly",width=56)
+        self.output_selector.pack(side="left",padx=8)
         self.save=tk.BooleanVar(value=False)
         ttk.Checkbutton(controls,text="Also save plots/data",variable=self.save).pack(side="left")
         tools=ttk.Frame(outer)
@@ -357,58 +358,77 @@ class ParameterPanel:
         self.log.pack(fill="x")
         for value in self.entries.values():
             value.trace_add("write",self.update_swap_rates)
+        self.update_sweep_state()
         self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.root.after(100,self.poll)
 
-    def build_sweep_tab(self):
-        tab=ttk.Frame(self.tabs,padding=18)
-        self.tabs.add(tab,text="Parameter sweep")
-        ttk.Label(tab,text="Step a model parameter and compare simulation outputs",
-                  font=("",15,"bold")).grid(row=0,column=0,columnspan=3,sticky="w",pady=(0,14))
-        self.sweep_labels={f"{label} [{key}] ({unit})":key
-                           for _,key,label,unit,_,_ in SWEEP_FIELDS}
+    def build_sweep_controls(self,parent,row,width):
+        optional=ttk.LabelFrame(parent,text="Optional",padding=12)
+        optional.grid(row=row,column=0,columnspan=3,sticky="ew",pady=(22,0))
+        optional.columnconfigure(1,weight=1)
+        ttk.Label(optional,text="Parameter sweep").grid(row=0,column=0,sticky="w",padx=(0,16))
+        self.sweep_enabled=tk.StringVar(value="Off")
+        ttk.Combobox(optional,textvariable=self.sweep_enabled,values=("Off","On"),
+                     state="readonly",width=9).grid(row=0,column=1,sticky="w")
+        self.sweep_controls=ttk.Frame(optional)
+        self.sweep_controls.grid(row=1,column=0,columnspan=2,sticky="ew",pady=(12,0))
+        self.sweep_controls.columnconfigure(1,weight=1)
+        self.sweep_labels={f"{key} ({unit})":key for _,key,_,unit,_,_ in SWEEP_FIELDS}
         default=next(label for label,key in self.sweep_labels.items() if key=="PHI_SWAP")
         self.sweep_parameter=tk.StringVar(value=default)
         self.sweep_start=tk.StringVar(value="0.26")
         self.sweep_stop=tk.StringVar(value="0.27")
         self.sweep_step=tk.StringVar(value="0.001")
-        self.sweep_direction=tk.StringVar(value="both")
-        ttk.Label(tab,text="Parameter").grid(row=1,column=0,sticky="w",pady=8)
-        ttk.Combobox(tab,textvariable=self.sweep_parameter,values=list(self.sweep_labels),
-                     state="readonly",width=72).grid(row=1,column=1,columnspan=2,sticky="w")
-        for row,(label,value) in enumerate((("Start",self.sweep_start),("Stop",self.sweep_stop),
-                                           ("Step",self.sweep_step)),start=2):
-            ttk.Label(tab,text=label).grid(row=row,column=0,sticky="w",padx=(0,20),pady=8)
-            ttk.Entry(tab,textvariable=value,width=22).grid(row=row,column=1,sticky="w")
-        ttk.Label(tab,text="Transfer directions").grid(row=5,column=0,sticky="w",pady=8)
-        ttk.Combobox(tab,textvariable=self.sweep_direction,values=("both","write","read"),
-                     state="readonly",width=20).grid(row=5,column=1,sticky="w")
+        ttk.Label(self.sweep_controls,text="Parameter").grid(row=0,column=0,sticky="w",padx=(0,16),pady=5)
+        ttk.Combobox(self.sweep_controls,textvariable=self.sweep_parameter,values=list(self.sweep_labels),
+                     state="readonly",width=28).grid(row=0,column=1,sticky="ew")
+        for index,(label,value) in enumerate((("Start",self.sweep_start),("Stop",self.sweep_stop),
+                                             ("Step",self.sweep_step)),start=1):
+            ttk.Label(self.sweep_controls,text=label).grid(row=index,column=0,sticky="w",pady=5)
+            ttk.Entry(self.sweep_controls,textvariable=value,width=16).grid(row=index,column=1,sticky="ew")
         self.sweep_preview=tk.StringVar()
-        ttk.Label(tab,textvariable=self.sweep_preview,wraplength=850).grid(
-            row=6,column=0,columnspan=3,sticky="w",pady=12)
-        ttk.Button(tab,text="Run sweep",command=self.run_sweep).grid(row=7,column=0,sticky="w",pady=10)
-        ttk.Label(tab,text=("Uses the current inputs from the other tabs. PHI_SWAP changes the flux pulse peak; "
-            "PHI_PARK changes the parked flux. Values use the selected parameter's units. "
-            "Points follow start + n × step; stop is included only if reached by that grid. "
-            "Use a negative step for descending sweeps. Up to 501 points.\n\n"
-            "Each point reloads the model, recomputes derived frequencies, couplings and pulse durations, "
-            "and independently calibrates its noiseless phase reference. No pulse optimization is performed. "
-            "Configured experimental tolerances are scanned at every sweep point and displayed as shaded ranges and summary columns. Write includes storage; read starts from an independently "
-            "prepared atomic state, held for the configured storage duration.\n\n"
-            "The result uses the full transfer figure layout with a sweep slider inside each figure. Drag the slider or use Previous / Next to update controls, detuning, populations, summary and 3D outputs. CSV/JSON summaries and per-point "
-            "fidelity/population traces are saved automatically in the run output folder. "
-            "Also save plots/data adds a PNG of the initial point for each direction. Stop calculation stops the sweep."),
-            wraplength=1000,justify="left").grid(row=8,column=0,columnspan=3,sticky="w",pady=12)
+        ttk.Label(optional,textvariable=self.sweep_preview,wraplength=int(width*.36)).grid(
+            row=2,column=0,columnspan=2,sticky="w",pady=(10,0))
+        ttk.Label(self.sweep_controls,text=("Uses the selected Output and Run simulation button. "
+            "The figure slider steps through results, including configured tolerances. "
+            "Negative steps sweep downward; up to 501 points."),
+            wraplength=int(width*.36),justify="left").grid(row=4,column=0,columnspan=2,sticky="w",pady=(8,0))
+        self.sweep_controls.grid_remove()
         for value in (self.sweep_parameter,self.sweep_start,self.sweep_stop,self.sweep_step):
             value.trace_add("write",self.update_sweep_preview)
+        self.sweep_enabled.trace_add("write",self.update_sweep_state)
+
+    def update_sweep_state(self,*_):
+        enabled=self.sweep_enabled.get()=="On"
+        if enabled:
+            self.sweep_controls.grid()
+        else:
+            self.sweep_controls.grid_remove()
+        modes=MODES[:3] if enabled else MODES
+        self.output_selector.configure(values=[name for name,_ in modes])
+        if self.mode.get() not in dict(modes):
+            self.mode.set("Both transfer directions")
         self.update_sweep_preview()
+
+    def simulation_mode_args(self):
+        if self.sweep_enabled.get()!="On":
+            return list(dict(MODES)[self.mode.get()])
+        directions={"Both transfer directions":"both", "Transmon to atom":"write", "Atom to transmon":"read"}
+        if self.mode.get() not in directions:
+            raise ValueError("Choose a transfer output for sweeping, or turn Parameter sweep Off in Numerics.")
+        return ["--parameter-sweep","--sweep-parameter",self.sweep_labels[self.sweep_parameter.get()],
+                "--sweep-start",self.sweep_start.get(),"--sweep-stop",self.sweep_stop.get(),
+                "--sweep-step",self.sweep_step.get(),"--sweep-direction",directions[self.mode.get()]]
 
     def sweep_points(self):
         return sweep_configs(self.config(),self.sweep_labels[self.sweep_parameter.get()],
                              self.sweep_start.get(),self.sweep_stop.get(),self.sweep_step.get())
 
     def update_sweep_preview(self,*_):
+        if self.sweep_enabled.get()!="On":
+            self.sweep_preview.set("Sweep is off. Turn on to simulate a parameter range.")
+            return
         try:
             points=self.sweep_points()
             key=self.sweep_labels[self.sweep_parameter.get()]
@@ -418,12 +438,6 @@ class ParameterPanel:
                                    "tolerance scenarios per point per direction. Each point may take some time.")
         except ValueError as exc:
             self.sweep_preview.set(str(exc))
-
-    def run_sweep(self):
-        if self.process and self.process.poll() is None:
-            return
-        self.mode.set("Parameter sweep")
-        self.run()
 
     def build_assistant_tab(self):
         tab=ttk.Frame(self.tabs,padding=12)
@@ -542,6 +556,7 @@ class ParameterPanel:
         self.log.configure(state="disabled")
 
     def reset(self):
+        self.sweep_enabled.set("Off")
         for key,value in DEFAULTS.items():
             self.entries[key].set(str(value))
         self.status.set("Default model parameters restored.")
@@ -573,7 +588,7 @@ class ParameterPanel:
         try:
             config=self.config()
             d=derived(config)
-            if "--parameter-sweep" in dict(MODES)[self.mode.get()]:
+            if "--parameter-sweep" in self.simulation_mode_args():
                 points=self.sweep_points()
                 self.status.set(f"Sweep checks passed: {len(points)} points.")
                 return True
@@ -606,11 +621,7 @@ class ParameterPanel:
         with tempfile.NamedTemporaryFile(mode="w",suffix=".json",prefix="hybrid-settings-",delete=False) as f:
             json.dump(run_config,f)
             self.temp_path=Path(f.name)
-        mode_args=list(dict(MODES)[self.mode.get()])
-        if "--parameter-sweep" in mode_args:
-            mode_args.extend(["--sweep-parameter",self.sweep_labels[self.sweep_parameter.get()],
-                              "--sweep-start",self.sweep_start.get(),"--sweep-stop",self.sweep_stop.get(),
-                              "--sweep-step",self.sweep_step.get(),"--sweep-direction",self.sweep_direction.get()])
+        mode_args=self.simulation_mode_args()
         reports_root=self.backend_path.parent.parent/"output"/"assistant_runs"
         try:
             reports_root.mkdir(parents=True,exist_ok=True)
@@ -637,7 +648,7 @@ class ParameterPanel:
         if "--parameter-sweep" in mode_args:
             self.last_run["sweep"]={"parameter":self.sweep_labels[self.sweep_parameter.get()],
                                     "start":self.sweep_start.get(),"stop":self.sweep_stop.get(),
-                                    "step":self.sweep_step.get(),"direction":self.sweep_direction.get()}
+                                    "step":self.sweep_step.get(),"direction":mode_args[mode_args.index("--sweep-direction")+1]}
         self.numerical_status.set("Numerical reports are being calculated for this run. Ask after a figure is ready.")
         self.stop_button.configure(state="normal")
         self.status.set("Calculating. Selected plot windows will open when ready; close them to finish the run.")
