@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import signal
 import subprocess
 import sys
 import tempfile
@@ -34,18 +35,23 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from hybrid_settings import FIELDS, DEFAULTS, validate, derived
+from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
+("Parameter sweep", ["--parameter-sweep"]),
 ("Both transfer directions", []),
 ("Transmon to atom", ["--write-only"]),
 ("Atom to transmon", ["--retrieve"]),
+("Simultaneous cavity resonance: transmon to atom", ["--simultaneous"]),
 ("Tolerance scan: best and worst sampled", ["--tolerance-scan"]),
 ]
 
 
 # Symbols use the same notation as the equations beneath each tab.
 PARAMETER_SYMBOLS = {
+    "SIM_HOLD_SCALE": r"s_{\mathrm{sim}}",
+    "SIM_RAMP": r"T_{\mathrm{ramp,sim}}",
     "FC": r"f_c",
     "PHI_SWAP": r"\phi_{\mathrm{swap}}",
     "V_SWAP": r"V_{\mathrm{swap}}",
@@ -119,6 +125,22 @@ def parameter_symbol_png(key, dpi=120):
 
 # Equations describe the implemented model; epsilon denotes energy divided by h.
 SECTION_EQUATIONS = {
+    "Simultaneous resonance": (
+        (
+            r"$f_T(\phi_{\mathrm{res}})=f_A(E_{\mathrm{res}})=f_c$",
+            r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{hold}}=s_{\mathrm{sim}}\pi/G$",
+            r"$P_{\max}=4g_{TC}^2g_{AC}^2/(g_{TC}^2+g_{AC}^2)^2$",
+        ),
+        "Select Simultaneous cavity resonance in Output. Both controls use sin-squared ramps "
+        "onto a shared flat resonant hold, then return to park before optical mapping. "
+        "Resonant flux and voltage are calculated from the cavity frequency; PHI_SWAP, V_SWAP "
+        "and the sequential pulse multipliers apply only to the sequential modes. "
+        "Coupling is evaluated at the resonant transmon flux. The hold multiplier starts at "
+        "the first ideal transfer maximum; ramps, losses and spectator interactions can shift it. "
+        "Unequal couplings limit ideal transfer; unity requires equal coupling magnitudes. "
+        "This output writes to atomic memory and includes the configured storage hold. "
+        "Tolerance bounds are not scanned in this mode; the output explicitly reports nominal results.",
+    ),
     "Cavity and transmon": (
         (
             r"$\epsilon_C=E_C/h,\quad \epsilon_J(\phi)=\epsilon_{J,\max}\sqrt{\cos^2(\pi\phi)+d^2\sin^2(\pi\phi)},\quad \phi=\Phi/\Phi_0$",
@@ -309,13 +331,14 @@ class ParameterPanel:
             note.grid(row=1,column=0,sticky="ew")
             equations.bind("<Configure>",lambda event,label=note:
                            label.configure(wraplength=max(200,event.width-24)))
+        self.build_sweep_tab()
         self.build_assistant_tab()
         controls=ttk.Frame(outer)
         controls.pack(fill="x")
         ttk.Label(controls,text="Output:").pack(side="left")
-        self.mode=tk.StringVar(value=MODES[0][0])
+        self.mode=tk.StringVar(value="Both transfer directions")
         ttk.Combobox(controls,textvariable=self.mode,values=[m[0] for m in MODES],
-                     state="readonly",width=40).pack(side="left",padx=8)
+                     state="readonly",width=56).pack(side="left",padx=8)
         self.save=tk.BooleanVar(value=False)
         ttk.Checkbutton(controls,text="Also save plots/data",variable=self.save).pack(side="left")
         tools=ttk.Frame(outer)
@@ -337,6 +360,70 @@ class ParameterPanel:
         self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.root.after(100,self.poll)
+
+    def build_sweep_tab(self):
+        tab=ttk.Frame(self.tabs,padding=18)
+        self.tabs.add(tab,text="Parameter sweep")
+        ttk.Label(tab,text="Step a model parameter and compare simulation outputs",
+                  font=("",15,"bold")).grid(row=0,column=0,columnspan=3,sticky="w",pady=(0,14))
+        self.sweep_labels={f"{label} [{key}] ({unit})":key
+                           for _,key,label,unit,_,_ in SWEEP_FIELDS}
+        default=next(label for label,key in self.sweep_labels.items() if key=="PHI_SWAP")
+        self.sweep_parameter=tk.StringVar(value=default)
+        self.sweep_start=tk.StringVar(value="0.26")
+        self.sweep_stop=tk.StringVar(value="0.27")
+        self.sweep_step=tk.StringVar(value="0.001")
+        self.sweep_direction=tk.StringVar(value="both")
+        ttk.Label(tab,text="Parameter").grid(row=1,column=0,sticky="w",pady=8)
+        ttk.Combobox(tab,textvariable=self.sweep_parameter,values=list(self.sweep_labels),
+                     state="readonly",width=72).grid(row=1,column=1,columnspan=2,sticky="w")
+        for row,(label,value) in enumerate((("Start",self.sweep_start),("Stop",self.sweep_stop),
+                                           ("Step",self.sweep_step)),start=2):
+            ttk.Label(tab,text=label).grid(row=row,column=0,sticky="w",padx=(0,20),pady=8)
+            ttk.Entry(tab,textvariable=value,width=22).grid(row=row,column=1,sticky="w")
+        ttk.Label(tab,text="Transfer directions").grid(row=5,column=0,sticky="w",pady=8)
+        ttk.Combobox(tab,textvariable=self.sweep_direction,values=("both","write","read"),
+                     state="readonly",width=20).grid(row=5,column=1,sticky="w")
+        self.sweep_preview=tk.StringVar()
+        ttk.Label(tab,textvariable=self.sweep_preview,wraplength=850).grid(
+            row=6,column=0,columnspan=3,sticky="w",pady=12)
+        ttk.Button(tab,text="Run sweep",command=self.run_sweep).grid(row=7,column=0,sticky="w",pady=10)
+        ttk.Label(tab,text=("Uses the current inputs from the other tabs. PHI_SWAP changes the flux pulse peak; "
+            "PHI_PARK changes the parked flux. Values use the selected parameter's units. "
+            "Points follow start + n × step; stop is included only if reached by that grid. "
+            "Use a negative step for descending sweeps. Up to 501 points.\n\n"
+            "Each point reloads the model, recomputes derived frequencies, couplings and pulse durations, "
+            "and independently calibrates its noiseless phase reference. No pulse optimization is performed. "
+            "Configured experimental tolerances are scanned at every sweep point and displayed as shaded ranges and summary columns. Write includes storage; read starts from an independently "
+            "prepared atomic state, held for the configured storage duration.\n\n"
+            "The result uses the full transfer figure layout with a sweep slider inside each figure. Drag the slider or use Previous / Next to update controls, detuning, populations, summary and 3D outputs. CSV/JSON summaries and per-point "
+            "fidelity/population traces are saved automatically in the run output folder. "
+            "Also save plots/data adds a PNG of the initial point for each direction. Stop calculation stops the sweep."),
+            wraplength=1000,justify="left").grid(row=8,column=0,columnspan=3,sticky="w",pady=12)
+        for value in (self.sweep_parameter,self.sweep_start,self.sweep_stop,self.sweep_step):
+            value.trace_add("write",self.update_sweep_preview)
+        self.update_sweep_preview()
+
+    def sweep_points(self):
+        return sweep_configs(self.config(),self.sweep_labels[self.sweep_parameter.get()],
+                             self.sweep_start.get(),self.sweep_stop.get(),self.sweep_step.get())
+
+    def update_sweep_preview(self,*_):
+        try:
+            points=self.sweep_points()
+            key=self.sweep_labels[self.sweep_parameter.get()]
+            self.sweep_preview.set(f"{len(points)} simulations: {key} from {points[0][key]:.10g} "
+                                   f"to {points[-1][key]:.10g}. "
+                                   f"{3**sum(points[0][name]>0 for name in ('FC_TOL','FT_TOL','FA_TOL','FLUX_TOL','EFIELD_TOL'))} "
+                                   "tolerance scenarios per point per direction. Each point may take some time.")
+        except ValueError as exc:
+            self.sweep_preview.set(str(exc))
+
+    def run_sweep(self):
+        if self.process and self.process.poll() is None:
+            return
+        self.mode.set("Parameter sweep")
+        self.run()
 
     def build_assistant_tab(self):
         tab=ttk.Frame(self.tabs,padding=12)
@@ -423,6 +510,7 @@ class ParameterPanel:
         self.assistant_append("\n[Answer cancelled]\n")
 
     def update_swap_rates(self,*_):
+        self.update_sweep_preview()
         try:
             config=self.config()
             d=derived(config)
@@ -483,7 +571,21 @@ class ParameterPanel:
 
     def check(self):
         try:
-            d=derived(self.config())
+            config=self.config()
+            d=derived(config)
+            if "--parameter-sweep" in dict(MODES)[self.mode.get()]:
+                points=self.sweep_points()
+                self.status.set(f"Sweep checks passed: {len(points)} points.")
+                return True
+            if "--simultaneous" in dict(MODES)[self.mode.get()]:
+                from simultaneous_coupling import resonance_settings
+                resonance=resonance_settings(config)
+                self.status.set(
+                    f"Simultaneous resonance: flux {resonance['resonant_flux']:.6g}; "
+                    f"voltage {resonance['resonant_voltage_V']:.6g} V; "
+                    f"hold {config['SIM_HOLD_SCALE']*resonance['reference_hold_us']:.6g} us; "
+                    f"ideal exchange limit {resonance['ideal_transfer_limit']:.6f}. Nominal results.")
+                return True
             self.status.set(
                 f"Model checks passed. Swap detuning TC/AC: "
                 f"{d['transmon_swap_detuning_MHz']:.5g}/{d['atom_swap_detuning_MHz']:.5g} MHz; "
@@ -504,7 +606,11 @@ class ParameterPanel:
         with tempfile.NamedTemporaryFile(mode="w",suffix=".json",prefix="hybrid-settings-",delete=False) as f:
             json.dump(run_config,f)
             self.temp_path=Path(f.name)
-        mode_args=dict(MODES)[self.mode.get()]
+        mode_args=list(dict(MODES)[self.mode.get()])
+        if "--parameter-sweep" in mode_args:
+            mode_args.extend(["--sweep-parameter",self.sweep_labels[self.sweep_parameter.get()],
+                              "--sweep-start",self.sweep_start.get(),"--sweep-stop",self.sweep_stop.get(),
+                              "--sweep-step",self.sweep_step.get(),"--sweep-direction",self.sweep_direction.get()])
         reports_root=self.backend_path.parent.parent/"output"/"assistant_runs"
         try:
             reports_root.mkdir(parents=True,exist_ok=True)
@@ -520,7 +626,7 @@ class ParameterPanel:
             command.append("--save")
         try:
             self.process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                                          text=True,bufsize=1)
+                                          text=True,bufsize=1,start_new_session=(os.name=="posix"))
         except Exception as exc:
             self.temp_path.unlink(missing_ok=True)
             messagebox.showerror("Could not start simulation",str(exc))
@@ -528,6 +634,10 @@ class ParameterPanel:
         self.run_button.configure(state="disabled")
         self.last_run={"settings":run_config,"mode":self.mode.get(),"status":"running","output":"",
                        "output_directory":report_directory}
+        if "--parameter-sweep" in mode_args:
+            self.last_run["sweep"]={"parameter":self.sweep_labels[self.sweep_parameter.get()],
+                                    "start":self.sweep_start.get(),"stop":self.sweep_stop.get(),
+                                    "step":self.sweep_step.get(),"direction":self.sweep_direction.get()}
         self.numerical_status.set("Numerical reports are being calculated for this run. Ask after a figure is ready.")
         self.stop_button.configure(state="normal")
         self.status.set("Calculating. Selected plot windows will open when ready; close them to finish the run.")
@@ -547,7 +657,9 @@ class ParameterPanel:
                     self.append(value)
                     if self.last_run is not None:
                         self.last_run["output"]=(self.last_run["output"]+value)[-3000:]
-                        if value.startswith("Full tolerance results:"):
+                        if value.startswith("Full parameter sweep results:"):
+                            self.numerical_status.set("Parameter sweep results available. Files: "+self.last_run["output_directory"])
+                        elif value.startswith("Full tolerance results:"):
                             self.numerical_status.set("Tolerance scan results available. Files: "+self.last_run["output_directory"])
                         elif value.startswith("Assistant numerical report ready:"):
                             self.numerical_status.set("Numerical plot data is available. Ask now, even while plot windows remain open. "
@@ -573,7 +685,7 @@ class ParameterPanel:
                     if self.last_run is not None:
                         self.last_run["status"]="finished" if value==0 else "stopped or failed"
                         folder=Path(self.last_run["output_directory"])
-                        available=[name for name in ("write","read","roundtrip","tolerance_scan") if (folder/(name+".json")).is_file()]
+                        available=[name for name in ("write","read","roundtrip","tolerance_scan","parameter_sweep") if (folder/(name+".json")).is_file()]
                         self.numerical_status.set("Numerical reports available: "+", ".join(available)+". Files: "+str(folder)
                                                   if available else "No numerical reports were produced for this run. See the calculation log.")
                     self.status.set("Run finished. Edit parameters and run again." if value==0
@@ -589,14 +701,26 @@ class ParameterPanel:
 
     def stop(self):
         if self.process and self.process.poll() is None:
-            self.process.terminate()
+            if os.name=="posix":
+                try:
+                    os.killpg(self.process.pid,signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            else:
+                self.process.terminate()
             self.status.set("Stopping calculation...")
 
     def close(self):
         if self.process and self.process.poll() is None:
             if not messagebox.askyesno("Close simulation panel","Stop the active run and close the panel?"):
                 return
-            self.process.terminate()
+            if os.name=="posix":
+                try:
+                    os.killpg(self.process.pid,signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            else:
+                self.process.terminate()
         self.assistant_cancel.set()
         if self.temp_path:
             self.temp_path.unlink(missing_ok=True)

@@ -1567,6 +1567,12 @@ def write_paper_figure(save=False, show=True):
         plt.show(block=True)
 
 
+def simultaneous_main(save=False):
+    """Write to memory with both transitions resonant with the cavity together."""
+    from simultaneous_coupling import run
+    return run(sys.modules[__name__], save=save)
+
+
 def all_figures(save=False):
     """Build the two compact windows before a single blocking show call."""
     jobs = [
@@ -1586,6 +1592,14 @@ if __name__ == "__main__":
         launch(backend_path=Path(__file__).resolve())
         raise SystemExit(0)
     parser = argparse.ArgumentParser()
+    parser.add_argument("--parameter-sweep", action="store_true", help="Sweep one model input and compare write/read fidelities.")
+    parser.add_argument("--sweep-parameter", default="PHI_SWAP")
+    parser.add_argument("--sweep-start", type=float, default=0.26)
+    parser.add_argument("--sweep-stop", type=float, default=0.27)
+    parser.add_argument("--sweep-step", type=float, default=0.001)
+    parser.add_argument("--sweep-direction", choices=("both", "write", "read"), default="both")
+    parser.add_argument("--sweep-point", help=argparse.SUPPRESS)
+    parser.add_argument("--simultaneous", action="store_true", help="Write with simultaneous transmon/atom/cavity resonance.")
     parser.add_argument("--tolerance-scan", action="store_true", help="Scan fixed +/- tolerances and show sampled best/worst fidelity.")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--leakage-scan", action="store_true")
@@ -1610,18 +1624,37 @@ if __name__ == "__main__":
     args = parser.parse_args()
     _ASSISTANT_OUTPUT = args.assistant_output
     selected_modes = sum((args.paper_figure, args.retrieve, args.roundtrip,
-                          args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only, args.tolerance_scan))
+                          args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only, args.tolerance_scan, args.simultaneous, args.parameter_sweep, bool(args.sweep_point)))
     if selected_modes > 1:
         parser.error("Choose one figure mode, or use --all-figures.")
     if args.all_figures and args.check:
         parser.error("--check runs verification separately from --all-figures.")
-    diagnostics = derived(_SETTINGS)
-    print(f"Pulse-peak detuning (MHz): "
-          f"transmon-cavity={diagnostics['transmon_swap_detuning_MHz']:.6g}; "
-          f"atom-cavity={diagnostics['atom_swap_detuning_MHz']:.6g}", flush=True)
-    print(f"Calculated g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
-          f"g_AC / 2pi: {G_AC/TWOPI:.6g} MHz", flush=True)
-    if args.tolerance_scan:
+    if not args.simultaneous:
+        diagnostics = derived(_SETTINGS)
+        print(f"Pulse-peak detuning (MHz): "
+              f"transmon-cavity={diagnostics['transmon_swap_detuning_MHz']:.6g}; "
+              f"atom-cavity={diagnostics['atom_swap_detuning_MHz']:.6g}", flush=True)
+        print(f"Calculated g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
+              f"g_AC / 2pi: {G_AC/TWOPI:.6g} MHz", flush=True)
+    if args.sweep_point:
+        from parameter_sweep import evaluate_point, atomic_json
+        directions = ("write", "read") if args.sweep_direction == "both" else (args.sweep_direction,)
+        atomic_json(args.sweep_point, evaluate_point(sys.modules[__name__], directions))
+    elif args.parameter_sweep:
+        import parameter_sweep
+        try:
+            parameter_sweep.run(sys.modules[__name__], _SETTINGS,
+                                args.sweep_parameter, args.sweep_start, args.sweep_stop,
+                                args.sweep_step, args.sweep_direction, save=args.save,
+                                output_directory=_ASSISTANT_OUTPUT)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.simultaneous:
+        try:
+            simultaneous_main(save=args.save)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.tolerance_scan:
         import tolerance_scan
         tolerance_scan.run(sys.modules[__name__], _SETTINGS, save=args.save,
                            output_directory=_ASSISTANT_OUTPUT)

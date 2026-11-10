@@ -52,6 +52,8 @@ FIELDS = [
 ("Experimental tolerances","FA_TOL","Atomic transition frequency tolerance (+/-)","MHz",0.0,"nonnegative"),
 ("Experimental tolerances","FLUX_TOL","Applied flux tolerance (+/-)","Phi/Phi0",0.0,"nonnegative"),
 ("Experimental tolerances","EFIELD_TOL","Total electric field tolerance (+/-)","V/cm",0.0,"nonnegative"),
+("Simultaneous resonance","SIM_HOLD_SCALE","Resonant hold time multiplier","dimensionless",1.0,"positive"),
+("Simultaneous resonance","SIM_RAMP","Simultaneous tuning ramp duration","us",0.0005,"positive"),
 ("Numerics","MAX_STEP","Maximum solver time step","us",0.0005,"positive"),
 ("Numerics","NC","Number of cavity Fock states","integer",3,"integer"),
 ]

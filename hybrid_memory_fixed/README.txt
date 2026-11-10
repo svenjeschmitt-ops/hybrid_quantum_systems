@@ -308,3 +308,77 @@ Panel numerical reports include full-resolution selected_input_tolerance_ranges
 traces and the final best/worst offsets under summary.tolerance_ranges.
 With zero tolerances, no extra simulations are run and outcome intervals
 collapse to their nominal values; timing cells still show a dash.
+
+
+Simultaneous shared-cavity resonance:
+Choose "Simultaneous cavity resonance: transmon to atom" in the Output menu.
+The Simultaneous resonance tab sets the hold multiplier (default 1) and
+sin-squared ramp duration (default 0.0005 us per ramp). The backend prepares
+r0, ramps the transmon and r0-r1 transition onto the same cavity resonance,
+holds both there, returns both controls to park, and maps r0/r1 to h0/h1.
+The configured STORAGE hold follows mapping. Both cavity couplings remain
+active throughout, with the transmon coupling evaluated at the calculated
+resonant flux. The cavity is explicitly simulated; there is no direct
+transmon-atom exchange term. PHI_SWAP, V_SWAP and sequential pulse scales
+are not used by this mode. Unreachable resonance settings raise an error.
+
+The ideal flat-hold reference time is pi/sqrt(g_TC^2+g_AC^2), with angular
+g in rad/us. Its multiplier can be adjusted to account for finite ramps.
+Even at exact resonance, unequal coupling magnitudes limit ideal exchange
+to 4*g_TC^2*g_AC^2/(g_TC^2+g_AC^2)^2; full exchange requires equal magnitudes.
+The reported limit excludes ramps, dissipation, optical errors and storage.
+Fidelities use the full joint target |g,0,atomic target>, no postselection,
+and one fixed noise-free phase calibration for every logical input.
+The figure uses the same structure as Transmon to atom: controls and detuning
+on top, full-width write dynamics in the middle, and a write + storage summary
+and 3D joint-output probabilities below. Dynamics end at optical mapping;
+the summary and g/e/+ output probabilities are evaluated after storage. Reported results are
+nominal: experimental tolerance bounds are not scanned in this mode.
+Assistant numerical reports identify the simultaneous protocol under write.json.
+Also save plots/data exports hybrid_simultaneous.png and hybrid_simultaneous.json.
+CLI: python hybrid_memory_fixed/backend.py --run --simultaneous
+Unattended: add --no-show; numerical exports: add --save.
+Checks: python -m unittest discover -s hybrid_memory_fixed -p 'test_simultaneous.py'
+
+Parameter sweeps:
+Open the Parameter sweep tab, select a parameter (PHI_SWAP by default), set
+start, stop and step, choose both/write/read, then click Run sweep. The current
+inputs in all other tabs form the baseline. PHI_SWAP sweeps the pulse peak;
+PHI_PARK sweeps the parked flux. A negative step runs a descending sweep.
+Points follow start+n*step; stop is included only when reached. All points
+are validated before starting; the limit is 501 points. Stop calculation
+terminates the sweep and its active solver process on macOS/Linux.
+
+Each point uses a freshly loaded model, including recalculated frequencies,
+couplings and derived pulse durations, and a separate noiseless phase
+calibration. No pulse optimization is performed. Configured experimental tolerances are
+scanned at each sweep point, holding that point's nominal calibration fixed. The summary
+metric is selected-input unconditional joint fidelity with configured noise.
+Write includes subsequent storage; read uses an independently prepared atomic
+input with storage before retrieval. Write traces end before storage; final
+write fidelity includes storage. Read trace time starts after storage.
+
+CSV/JSON summaries and per-point JSON dynamics (fidelities and populations)
+are always saved to a unique output folder. Completed points survive a stopped
+run; check status and completed count against total_points before use.
+Sweep figures use the ordinary transfer layout, including controls, detunings,
+populations, summary table and 3D basis outputs. An in-figure slider and
+Previous/Next buttons select the precomputed sweep point and update every
+panel together. Each direction has its own figure. Also save plots/data adds
+a PNG of the initial point for each direction; use the figure toolbar to save
+other selected points. Per-point files include the full figure report. Panel output is saved under
+output/assistant_runs; CLI output defaults to output/sweep_runs.
+
+CLI example:
+python hybrid_memory_fixed/backend.py --parameter-sweep --sweep-parameter PHI_SWAP --sweep-start 0.26 --sweep-stop 0.27 --sweep-step 0.001 --sweep-direction both --no-show --save
+
+Sweep tolerances:
+Nonzero bounds in Experimental tolerances also apply during parameter sweeps.
+Each point tests the Cartesian -bound/zero/+bound grid around its own nominal
+model, using fixed nominal couplings, timing and phase within that point.
+The sweep slider updates shaded flux/detuning/population ranges and the
+With tolerances summary column. 3D output columns remain nominal. These are
+sampled extrema, not guaranteed continuous bounds or statistical confidence
+intervals. All-zero bounds retain nominal output without extra simulations.
+CSV and summary JSON also include final fidelity low/high columns per direction.
+The cost multiplies by 3^N scenarios per point per direction for N nonzero bounds.
