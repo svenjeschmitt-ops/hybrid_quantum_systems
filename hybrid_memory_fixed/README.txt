@@ -102,7 +102,8 @@ python -m pip install "qutip>=5,<6" numpy matplotlib
 The panel starts the backend path supplied by backend.py, so it does not
 depend on the old codetest.py filename. Plot exports remain optional.
 
-Couplings are now calculated rather than entered directly. The Coupling
+Couplings default to calculation from physical inputs. Direct information for
+coupling enables optional manual input. The Coupling
 parameters tab takes beta (capacitive participation), V_ZPF_UV (local cavity
 zero-point voltage in microvolts), D_01_EA0 (transition dipole magnitude in elementary charge times
 Bohr radius), E_ZPF_V_PER_M (local cavity zero-point electric field in V/m),
@@ -387,3 +388,26 @@ sampled extrema, not guaranteed continuous bounds or statistical confidence
 intervals. All-zero bounds retain nominal output without extra simulations.
 CSV and summary JSON also include final fidelity low/high columns per direction.
 The cost multiplies by 3^N scenarios per point per direction for N nonzero bounds.
+
+Direct coupling inputs:
+In Coupling parameters, enable Direct information for coupling to enter
+transmon–cavity and atom–cavity coupling magnitudes directly as g/(2*pi) in
+MHz. Both must be finite and positive. Physical coupling fields are disabled
+while manual mode is selected. Turn the button off to restore calculated
+couplings. The equations and live coupling/timing display follow the mode.
+The mode and values are saved with settings and numerical reports.
+CLI/config keys: DIRECT_COUPLING=1, G_TC_MHZ and G_AC_MHZ; the default
+DIRECT_COUPLING=0 retains the physical-input formulas. Older settings without
+these keys continue to use calculated couplings. Ambiguous legacy G_TC/G_AC
+keys remain rejected. Manual values apply to sequential and simultaneous
+Hamiltonians, swap timing, tolerance scans and parameter sweeps. Flux and
+voltage continue to set detuning; changing coupling does not retune resonance
+or optimize pulses. Manual-coupling sweeps require manual mode enabled.
+
+Enable Simultaneous resonance in Coupling parameters to reveal its hold
+multiplier and ramp settings in the same tab. The equations, live resonance
+summary and Output selection follow the toggle. There is no separate
+Simultaneous resonance tab. Calculated/manual coupling selection and manual
+strengths are retained. Turning the toggle off selects sequential writing.
+If parameter sweeping was on, enabling simultaneous resonance turns it off
+and reports this in the status line. Click Run simulation when ready.

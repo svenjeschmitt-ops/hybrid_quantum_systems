@@ -21,6 +21,9 @@ FIELDS = [
 ("Coupling parameters","D_01_EA0","Atomic transition dipole magnitude |d_01|","e a0",1000.0,"positive"),
 ("Coupling parameters","E_ZPF_V_PER_M","Cavity zero-point field at atom","V/m",0.8,"positive"),
 ("Coupling parameters","DIPOLE_ALIGNMENT","Dipole-field alignment cos(theta)","dimensionless",1.0,"free"),
+("Coupling parameters","DIRECT_COUPLING","Use direct coupling inputs","0=calculated, 1=manual",0,"boolean"),
+("Coupling parameters","G_TC_MHZ","Transmon-cavity coupling g_TC / (2 pi)","MHz",11.023791568183459,"positive"),
+("Coupling parameters","G_AC_MHZ","Atom-cavity coupling g_AC / (2 pi)","MHz",10.236358418015183,"positive"),
 ("Atom and electrodes","F_A_ZERO","Zero-field Rydberg transition","MHz",5150.0,"positive"),
 ("Atom and electrodes","K_R0","Lower Rydberg Stark coefficient","MHz/(V/cm)^2",-2.0,"free"),
 ("Atom and electrodes","K_R1","Upper Rydberg Stark coefficient","MHz/(V/cm)^2",-12.0,"free"),
@@ -80,6 +83,9 @@ def coupling_strengths(config):
     hbar with h; dividing Hz by 1e6 gives MHz.
     V_zpf and E_zpf are local vacuum RMS amplitudes, not peak fields.
     """
+    if config.get("DIRECT_COUPLING", 0):
+        return {"transmon_coupling_MHz": config["G_TC_MHZ"],
+                "atom_coupling_MHz": config["G_AC_MHZ"]}
     n_01 = transmon_operating_point(config)["transmon_charge_matrix_element"]
     return {
         "transmon_coupling_MHz": (2 * ELEMENTARY_CHARGE / PLANCK
@@ -116,8 +122,8 @@ def validate(values):
         raise ValueError("F_T_PARK is now calculated from PHI_PARK. "
                          "Replace F_T_PARK with the applied parked flux PHI_PARK in saved settings.")
     if {"G_TC", "G_AC"} & set(values):
-        raise ValueError("G_TC and G_AC are now calculated. Replace coupling inputs with "
-                         "BETA, V_ZPF_UV, D_01_EA0, E_ZPF_V_PER_M, and DIPOLE_ALIGNMENT.")
+        raise ValueError("G_TC/G_AC have ambiguous units. For manual coupling use DIRECT_COUPLING=1 "
+                         "and G_TC_MHZ/G_AC_MHZ in g/(2*pi) MHz, or use the physical coupling inputs.")
     if "N_01" in values:
         raise ValueError("N_01 is now calculated from the effective Josephson energy at "
                          "the swap flux and EC. Remove N_01 from saved settings.")
@@ -137,6 +143,10 @@ def validate(values):
             raise ValueError(label + " must be greater than zero.")
         if rule == "nonnegative" and value < 0:
             raise ValueError(label + " cannot be negative.")
+        if rule == "boolean":
+            if value not in (0, 1):
+                raise ValueError(label + " must be 0 (calculated) or 1 (manual).")
+            value = int(value)
         if rule == "integer":
             if value != int(value) or value < 3:
                 raise ValueError("Use at least 3 cavity Fock states (an integer).")

@@ -1634,7 +1634,7 @@ if __name__ == "__main__":
         print(f"Pulse-peak detuning (MHz): "
               f"transmon-cavity={diagnostics['transmon_swap_detuning_MHz']:.6g}; "
               f"atom-cavity={diagnostics['atom_swap_detuning_MHz']:.6g}", flush=True)
-        print(f"Calculated g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
+        print(f"{'Manual' if _SETTINGS['DIRECT_COUPLING'] else 'Calculated'} g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
               f"g_AC / 2pi: {G_AC/TWOPI:.6g} MHz", flush=True)
     if args.sweep_point:
         from parameter_sweep import evaluate_point, atomic_json

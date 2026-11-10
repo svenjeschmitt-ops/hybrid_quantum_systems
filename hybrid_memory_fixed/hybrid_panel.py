@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -58,6 +59,8 @@ PARAMETER_SYMBOLS = {
     "EJ_MAX": r"\epsilon_{J,\max}=E_{J,\max}/h",
     "ASYMMETRY": r"d",
     "PHI_PARK": r"\phi_{\mathrm{park}}",
+    "G_TC_MHZ": r"g_{TC}/(2\pi)",
+    "G_AC_MHZ": r"g_{AC}/(2\pi)",
     "BETA": r"\beta",
     "V_ZPF_UV": r"V_{\mathrm{zpf}}",
     "D_01_EA0": r"|d_{01}|",
@@ -130,11 +133,11 @@ SECTION_EQUATIONS = {
             r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{hold}}=s_{\mathrm{sim}}\pi/G$",
             r"$P_{\max}=4g_{TC}^2g_{AC}^2/(g_{TC}^2+g_{AC}^2)^2$",
         ),
-        "Select Simultaneous cavity resonance in Output. Both controls use sin-squared ramps "
+        "Enable Simultaneous resonance in Coupling parameters and set its hold multiplier and ramp duration below. Both controls use sin-squared ramps "
         "onto a shared flat resonant hold, then return to park before optical mapping. "
         "Resonant flux and voltage are calculated from the cavity frequency; PHI_SWAP, V_SWAP "
         "and the sequential pulse multipliers apply only to the sequential modes. "
-        "Coupling is evaluated at the resonant transmon flux. The hold multiplier starts at "
+        "Calculated coupling is evaluated at the resonant transmon flux; manual mode uses your entered strengths. The hold multiplier starts at "
         "the first ideal transfer maximum; ramps, losses and spectator interactions can shift it. "
         "Unequal couplings limit ideal transfer; unity requires equal coupling magnitudes. "
         "This output writes to atomic memory and includes the configured storage hold. "
@@ -163,6 +166,17 @@ SECTION_EQUATIONS = {
         "C_g is the coupling capacitance; "
         "C_Σ is total transmon capacitance. The charge matrix element is calculated at the swap point. "
         "Swap frequencies shown are nominal resonant population oscillation rates; detuning reduces transfer.",
+    ),
+    "Direct coupling": (
+        (
+            r"$g_{TC}=2\pi\,g_{TC,\mathrm{input}},\qquad g_{AC}=2\pi\,g_{AC,\mathrm{input}}$",
+            r"$f_{\mathrm{swap},j}=2g_{j,\mathrm{input}},\qquad t_{\mathrm{ref},j}=1/(4g_{j,\mathrm{input}})$",
+            r"$T_j=s_j(2T_{\mathrm{ramp}}+t_{\mathrm{ref},j}),\qquad j\in\{TC,AC\}$",
+        ),
+        "Manual inputs are g/(2 pi) in MHz. Both positive coupling magnitudes replace the physical-input formulas. "
+        "The Hamiltonian uses g in rad/us. These values set swap reference times and remain constant during flux "
+        "and voltage pulses, including simultaneous resonance, sweeps and tolerance scenarios. "
+        "Changing coupling does not retune resonance or optimize the pulse multipliers.",
     ),
     "Atom and electrodes": (
         (
@@ -205,18 +219,9 @@ SECTION_EQUATIONS = {
             r"$f_{T,\mathrm{actual}}(t)=f_T(\phi_{\mathrm{actual}}(t))+\delta f_T$",
             r"$f_{A,\mathrm{actual}}(t)=f_{A,0}+(K_{r1}-K_{r0})E_{\mathrm{actual}}^2(t)+\delta f_A$",
         ),
-        "Nonzero tolerances automatically add shaded sampled ranges to Both transfer directions, "
-        "Transmon to atom, and Atom to transmon outputs. Each tolerance is a fixed absolute +/- bound, "
-        "not a percentage or random noise. The scan tests all combinations of negative bound, "
-        "zero and positive bound (3^N runs for N nonzero tolerances; up to 243). "
-        "Offsets remain constant through writing, storage and readout. "
-        "Pulse timing, couplings, optical carriers and phase correction keep their nominal calibration. "
-        "Frequency offsets are additional to flux/Stark shifts; avoid counting the same uncertainty twice. "
-        "Summary columns compare nominal values with sampled ranges for all metrics, including logical-input fidelities, coherence and residual populations. "
-        "Best and worst are among sampled points, not guaranteed extrema within the bounds. "
-        "Lines and 3D basis-output columns are nominal; shaded dynamics and With tolerances summary columns "
-        "show sampled error ranges. The separate Tolerance scan output compares final outcomes. "
-        "Flux errors can cross a SQUID sweet spot; the periodic flux relation is used without clipping.",
+        "Enter absolute ± bounds; 0 disables a tolerance.\n"
+        "Transfer plots and sweeps show shaded ranges and a With tolerances column.\n"
+        "Ranges are sampled, not guaranteed limits. Details: README.txt.",
     ),
     "Numerics": (
         (
@@ -278,18 +283,21 @@ class ParameterPanel:
         root.geometry(f"{width}x{height}")
         root.minsize(min(width,1100),min(height,700))
         self.entries={}
+        self.input_widgets={}
         self.equation_images={}
         self.symbol_images={}
+        self.parameter_tabs={}
         outer=ttk.Frame(root,padding=14)
         outer.pack(fill="both",expand=True)
         ttk.Label(outer,text="Hybrid quantum memory",font=("",18,"bold")).pack(anchor="w")
         ttk.Label(outer,text="Set model parameters, choose output, then run. Plots open in closable windows.").pack(anchor="w",pady=(3,10))
         self.tabs=ttk.Notebook(outer)
         self.tabs.pack(fill="both",expand=True)
-        groups=list(dict.fromkeys(row[0] for row in FIELDS))
+        groups=list(dict.fromkeys(row[0] for row in FIELDS if row[0]!="Simultaneous resonance"))
         for group in groups:
             tab=ttk.Frame(self.tabs)
             self.tabs.add(tab,text=group)
+            self.parameter_tabs[group]=tab
             tab.columnconfigure(0,weight=1)
             tab.columnconfigure(1,weight=1)
             tab.rowconfigure(0,weight=1)
@@ -299,7 +307,7 @@ class ParameterPanel:
             equations=ttk.Frame(tab,padding=(12,16,12,12))
             equations.grid(row=0,column=1,sticky="new")
             equations.columnconfigure(0,weight=1)
-            for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group):
+            for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ")):
                 label_cell=ttk.Frame(frame)
                 label_cell.grid(row=row,column=0,sticky="w",padx=(0,12),pady=7)
                 ttk.Label(label_cell,text=PARAMETER_CAPTIONS.get(key,label)).pack(side="left")
@@ -312,24 +320,29 @@ class ParameterPanel:
                 entry.grid(row=row,column=1,sticky="ew",pady=7)
                 ttk.Label(frame,text=units).grid(row=row,column=2,sticky="w",padx=10)
                 self.entries[key]=value
+                self.input_widgets[key]=entry
             if group == "Cavity and transmon":
                 self.transmon_tuning=tk.StringVar()
                 ttk.Label(frame,textvariable=self.transmon_tuning,wraplength=int(width*.4)).grid(
                     row=row+1,column=0,columnspan=3,sticky="w",pady=(12,0))
             if group == "Coupling parameters":
+                self.build_direct_coupling_controls(frame,row+1,width)
                 self.swap_rates=tk.StringVar()
                 ttk.Label(frame,textvariable=self.swap_rates,wraplength=int(width*.4)).grid(
-                    row=row+1,column=0,columnspan=3,sticky="w",pady=(12,0))
+                    row=row+2,column=0,columnspan=3,sticky="w",pady=(12,0))
             if group == "Numerics":
                 self.build_sweep_controls(frame,row+1,width)
             self.equation_images[group]=tk.PhotoImage(
                 master=root,data=base64.b64encode(section_equations_png(
                     group,dpi=root.winfo_fpixels("1i"),max_width=int(width*.45))).decode("ascii"))
-            ttk.Label(equations,image=self.equation_images[group]).grid(
-                row=0,column=0,sticky="w",pady=(0,12))
+            equation_label=ttk.Label(equations,image=self.equation_images[group])
+            equation_label.grid(row=0,column=0,sticky="w",pady=(0,12))
             note=ttk.Label(equations,text=SECTION_EQUATIONS[group][1],
                            wraplength=int(width*.43))
             note.grid(row=1,column=0,sticky="ew")
+            if group == "Coupling parameters":
+                self.coupling_equation_label=equation_label
+                self.coupling_note=note
             equations.bind("<Configure>",lambda event,label=note:
                            label.configure(wraplength=max(200,event.width-24)))
         self.build_assistant_tab()
@@ -358,10 +371,87 @@ class ParameterPanel:
         self.log.pack(fill="x")
         for value in self.entries.values():
             value.trace_add("write",self.update_swap_rates)
+        self.mode.trace_add("write",self.sync_simultaneous_mode)
+        self.sync_simultaneous_mode()
         self.update_sweep_state()
         self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.root.after(100,self.poll)
+
+    def build_direct_coupling_controls(self,parent,row,width):
+        box=ttk.Frame(parent)
+        box.grid(row=row,column=0,columnspan=3,sticky="ew",pady=(14,0))
+        self.entries["DIRECT_COUPLING"]=tk.StringVar(value=str(DEFAULTS["DIRECT_COUPLING"]))
+        self.direct_coupling_button=ttk.Checkbutton(box,text="Direct information for coupling",
+            variable=self.entries["DIRECT_COUPLING"],onvalue="1",offvalue="0")
+        self.direct_coupling_button.grid(row=0,column=0,sticky="w")
+        self.direct_coupling_frame=ttk.Frame(box,padding=(0,10,0,0))
+        self.direct_coupling_frame.grid(row=1,column=0,sticky="ew")
+        self.direct_coupling_frame.columnconfigure(1,weight=1)
+        for index,(key,label) in enumerate((("G_TC_MHZ","Transmon–cavity g_TC / (2π)"),
+                                            ("G_AC_MHZ","Atom–cavity g_AC / (2π)"))):
+            self.entries[key]=tk.StringVar(value=str(DEFAULTS[key]))
+            ttk.Label(self.direct_coupling_frame,text=label).grid(row=index,column=0,sticky="w",padx=(0,12),pady=5)
+            entry=ttk.Entry(self.direct_coupling_frame,textvariable=self.entries[key],width=16)
+            entry.grid(row=index,column=1,sticky="ew",pady=5)
+            ttk.Label(self.direct_coupling_frame,text="MHz").grid(row=index,column=2,padx=8)
+            self.input_widgets[key]=entry
+        self.simultaneous_enabled=tk.BooleanVar(value=False)
+        self.simultaneous_button=ttk.Checkbutton(box,text="Simultaneous resonance",
+            variable=self.simultaneous_enabled,command=self.toggle_simultaneous_resonance)
+        self.simultaneous_button.grid(row=2,column=0,sticky="w",pady=(12,0))
+        self.simultaneous_frame=ttk.LabelFrame(box,text="Simultaneous resonance settings",padding=10)
+        self.simultaneous_frame.grid(row=3,column=0,sticky="ew",pady=(8,0))
+        self.simultaneous_frame.columnconfigure(1,weight=1)
+        for index,(_,key,label,units,default,_) in enumerate(f for f in FIELDS if f[0]=="Simultaneous resonance"):
+            self.entries[key]=tk.StringVar(value=str(default))
+            ttk.Label(self.simultaneous_frame,text=label).grid(row=index,column=0,sticky="w",padx=(0,12),pady=5)
+            entry=ttk.Entry(self.simultaneous_frame,textvariable=self.entries[key],width=16)
+            entry.grid(row=index,column=1,sticky="ew",pady=5)
+            ttk.Label(self.simultaneous_frame,text=units).grid(row=index,column=2,padx=8)
+            self.input_widgets[key]=entry
+        self.simultaneous_frame.grid_remove()
+        self.direct_coupling_frame.grid_remove()
+        self.entries["DIRECT_COUPLING"].trace_add("write",self.update_coupling_mode)
+
+    def toggle_simultaneous_resonance(self):
+        if self.simultaneous_enabled.get():
+            sweeping=self.sweep_enabled.get()=="On"
+            self.sweep_enabled.set("Off")
+            self.mode.set("Simultaneous cavity resonance: transmon to atom")
+            self.status.set("Simultaneous resonance is on. Set hold/ramp below, then click Run simulation."
+                            + (" Parameter sweep was turned off for this output." if sweeping else ""))
+        else:
+            self.mode.set("Transmon to atom")
+            self.status.set("Simultaneous resonance is off. Sequential transmon-to-atom transfer selected.")
+
+    def sync_simultaneous_mode(self,*_):
+        enabled=self.mode.get()=="Simultaneous cavity resonance: transmon to atom"
+        self.simultaneous_enabled.set(enabled)
+        if enabled:
+            if self.sweep_enabled.get()=="On":
+                self.sweep_enabled.set("Off")
+            self.simultaneous_frame.grid()
+        else:
+            self.simultaneous_frame.grid_remove()
+        self.update_coupling_mode()
+        self.update_swap_rates()
+
+    def update_coupling_mode(self,*_):
+        manual=self.entries["DIRECT_COUPLING"].get() in ("1","1.0")
+        if manual:
+            self.direct_coupling_frame.grid()
+        else:
+            self.direct_coupling_frame.grid_remove()
+        for key in ("BETA","V_ZPF_UV","D_01_EA0","E_ZPF_V_PER_M","DIPOLE_ALIGNMENT"):
+            self.input_widgets[key].configure(state="disabled" if manual else "normal")
+        group=("Simultaneous resonance" if self.simultaneous_enabled.get() else
+               "Direct coupling" if manual else "Coupling parameters")
+        self.equation_images["Coupling parameters"]=tk.PhotoImage(master=self.root,
+            data=base64.b64encode(section_equations_png(group,dpi=self.root.winfo_fpixels("1i"),
+                 max_width=int(self.root.winfo_screenwidth()*.42))).decode("ascii"))
+        self.coupling_equation_label.configure(image=self.equation_images["Coupling parameters"])
+        self.coupling_note.configure(text=SECTION_EQUATIONS[group][1])
 
     def build_sweep_controls(self,parent,row,width):
         optional=ttk.LabelFrame(parent,text="Optional",padding=12)
@@ -540,7 +630,23 @@ class ParameterPanel:
             f"Parked transmon {d['transmon_park_frequency_MHz']:.6g} MHz; "
             f"detuning: {d['transmon_park_frequency_MHz']-config['FC']:+.6g} MHz.\n"
             "Tune the interaction flux to set the transmon resonance frequency.")
+        if self.simultaneous_enabled.get():
+            try:
+                from simultaneous_coupling import resonance_settings
+                resonance=resonance_settings(config)
+            except ValueError as exc:
+                self.swap_rates.set(str(exc))
+                return
+            self.swap_rates.set(
+                f"{'Manual' if config['DIRECT_COUPLING'] else 'Calculated'} resonant couplings g/(2π): "
+                f"TC {resonance['g_TC_rad_per_us']/(2*math.pi):.5g}; "
+                f"AC {resonance['g_AC_rad_per_us']/(2*math.pi):.5g} MHz.\n"
+                f"Resonant flux {resonance['resonant_flux']:.6g}; voltage {resonance['resonant_voltage_V']:.6g} V.\n"
+                f"Shared hold: {config['SIM_HOLD_SCALE']*resonance['reference_hold_us']:.6g} us; "
+                f"ramp: {config['SIM_RAMP']:.6g} us; ideal exchange limit: {resonance['ideal_transfer_limit']:.6f}.")
+            return
         self.swap_rates.set(
+            f"{'Manual' if config['DIRECT_COUPLING'] else 'Calculated'} couplings g/(2π): TC {d['transmon_coupling_MHz']:.5g}; AC {d['atom_coupling_MHz']:.5g} MHz.\n"
             f"Nominal resonant swap frequencies: TC {d['transmon_swap_frequency_MHz']:.5g} MHz; "
             f"AC {d['atom_swap_frequency_MHz']:.5g} MHz.\n"
             f"Rounded pulse durations: TC {d['transmon_pulse_duration_us']:.5g} us; "
@@ -557,6 +663,7 @@ class ParameterPanel:
 
     def reset(self):
         self.sweep_enabled.set("Off")
+        self.mode.set("Both transfer directions")
         for key,value in DEFAULTS.items():
             self.entries[key].set(str(value))
         self.status.set("Default model parameters restored.")

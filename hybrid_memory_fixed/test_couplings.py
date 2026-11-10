@@ -142,6 +142,53 @@ class CouplingTests(unittest.TestCase):
             self.assertAlmostEqual(changed[hold], 2*base[hold])
             self.assertAlmostEqual(changed[frequency]*changed[hold], .5)
 
+    def test_manual_couplings_override_physical_formulas_and_drive_timing(self):
+        c = validate({'DIRECT_COUPLING': 1, 'G_TC_MHZ': 3.0, 'G_AC_MHZ': 7.0,
+                      'BETA': .2, 'DIPOLE_ALIGNMENT': 0})
+        rates = coupling_strengths(c)
+        self.assertEqual(rates, {'transmon_coupling_MHz': 3.0, 'atom_coupling_MHz': 7.0})
+        d = derived(c)
+        self.assertEqual(d['transmon_swap_frequency_MHz'], 6.0)
+        self.assertAlmostEqual(d['transmon_swap_hold_us'], 1/12)
+        self.assertAlmostEqual(d['atom_pulse_duration_us'], c['AC_PULSE_SCALE']*(2*c['RAMP']+1/28))
+        from simultaneous_coupling import resonance_settings
+        info = resonance_settings(c)
+        self.assertAlmostEqual(info['g_TC_rad_per_us'], 6*math.pi)
+        self.assertAlmostEqual(info['g_AC_rad_per_us'], 14*math.pi)
+        self.assertAlmostEqual(info['reference_hold_us'], 1/(2*math.sqrt(3**2+7**2)))
+        self.assertAlmostEqual(info['ideal_transfer_limit'], 4*3**2*7**2/(3**2+7**2)**2)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'manual.json'
+            path.write_text(json.dumps(c))
+            self.assertEqual(load(path), c)
+            spec = importlib.util.spec_from_file_location('manual_coupling_backend', Path(__file__).with_name('backend.py'))
+            b = importlib.util.module_from_spec(spec)
+            with patch.object(sys, 'argv', ['backend.py', '--config', str(path)]):
+                spec.loader.exec_module(b)
+        initial = b.qt.tensor(b.e, b.qt.basis(b.NC, 0), b.r0)
+        photon = b.qt.tensor(b.g, b.qt.basis(b.NC, 1), b.r0)
+        atom = b.qt.tensor(b.g, b.qt.basis(b.NC, 0), b.r1)
+        self.assertAlmostEqual(b.H_coupling.matrix_element(photon.dag(), initial), 2*math.pi*3)
+        self.assertAlmostEqual(b.H_coupling.matrix_element(atom.dag(), photon), 2*math.pi*7)
+        self.assertAlmostEqual(b.TC[1]-b.TC[0], d['transmon_pulse_duration_us'])
+        self.assertAlmostEqual(b.AC[1]-b.AC[0], d['atom_pulse_duration_us'])
+
+    def test_manual_mode_validation_and_sweep_selection(self):
+        for values in ({'DIRECT_COUPLING': 2}, {'DIRECT_COUPLING': -1},
+                       {'DIRECT_COUPLING': 1, 'G_TC_MHZ': 0},
+                       {'DIRECT_COUPLING': 1, 'G_AC_MHZ': -1},
+                       {'DIRECT_COUPLING': 1, 'G_AC_MHZ': float('inf')}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                validate(values)
+        from parameter_sweep import sweep_configs
+        with self.assertRaisesRegex(ValueError, 'Enable Direct'):
+            sweep_configs({}, 'G_TC_MHZ', 2, 4, 1)
+        with self.assertRaisesRegex(ValueError, 'Turn off Direct'):
+            sweep_configs({'DIRECT_COUPLING': 1}, 'BETA', .02, .04, .01)
+        points = sweep_configs({'DIRECT_COUPLING': 1}, 'G_TC_MHZ', 2, 4, 1)
+        self.assertEqual([coupling_strengths(c)['transmon_coupling_MHz'] for c in points], [2, 3, 4])
+        self.assertEqual(validate({})['DIRECT_COUPLING'], 0)
+
     def test_applied_voltage_and_stray_field_set_atomic_frequency(self):
         for overrides in ({"V_SWAP": 0}, {"V_SWAP": -.2},
                           {"STRAY_FIELD": .7, "GAP_CM": .2},

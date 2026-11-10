@@ -14,7 +14,8 @@ import uuid
 from hybrid_settings import FIELDS, validate, derived
 
 SWEEP_FIELDS = [row for row in FIELDS
-                if row[0] not in ('Experimental tolerances', 'Simultaneous resonance', 'Numerics')]
+                if row[0] not in ('Experimental tolerances', 'Simultaneous resonance', 'Numerics')
+                and row[-1] != 'boolean']
 MAX_POINTS = 501
 
 
@@ -37,6 +38,10 @@ def sweep_configs(config, parameter, start, stop, step):
     if count < 2:
         raise ValueError('The step must produce at least two sweep points.')
     base = validate(config)
+    if parameter in ('G_TC_MHZ', 'G_AC_MHZ') and not base['DIRECT_COUPLING']:
+        raise ValueError('Enable Direct information for coupling before sweeping manual coupling strengths.')
+    if parameter in ('BETA', 'V_ZPF_UV', 'D_01_EA0', 'E_ZPF_V_PER_M', 'DIPOLE_ALIGNMENT') and base['DIRECT_COUPLING']:
+        raise ValueError('Turn off Direct information for coupling to sweep physical coupling inputs.')
     points = []
     for index in range(count):
         value = start + index * step
