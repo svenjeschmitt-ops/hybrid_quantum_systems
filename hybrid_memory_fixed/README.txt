@@ -336,8 +336,8 @@ The Experimental tolerances tab accepts absolute +/- bounds FC_TOL, FT_TOL,
 FA_TOL (MHz), FLUX_TOL (Phi/Phi0), and EFIELD_TOL (V/cm). Defaults are zero.
 Nonzero tolerances automatically add shaded sampled ranges to the ordinary
 Both transfer directions, Transmon to atom and Atom to transmon figures.
-The separate 'Tolerance scan: best and worst sampled' output compares final results.
-CLI: python hybrid_memory_fixed/backend.py --tolerance-scan --config settings.json
+A standalone scan comparing final results remains available through the CLI:
+python hybrid_memory_fixed/backend.py --tolerance-scan --config settings.json
 Use --no-show for unattended runs; --save also exports the summary plot.
 
 The scan tests all combinations of -bound, zero and +bound for each nonzero
@@ -416,16 +416,27 @@ shift the full protocol optimum. Sequential timing retains the existing scales.
 Even at exact resonance, unequal coupling magnitudes limit ideal exchange
 to 4*g_TC^2*g_AC^2/(g_TC^2+g_AC^2)^2; full exchange requires equal magnitudes.
 The reported limit excludes optical preparation/mapping, dissipation and storage.
-Fidelities use the full joint target |g,0,atomic target>, no postselection,
-and one fixed noise-free phase calibration for every logical input.
-The figure uses the same structure as Transmon to atom: controls and detuning
-on top, full-width write dynamics in the middle, and a write + storage summary
-and 3D joint-output probabilities below. Dynamics end at optical mapping;
-the summary and g/e/+ output probabilities are evaluated after storage. Reported results are
-nominal: experimental tolerance bounds are not scanned in this mode.
-Assistant numerical reports identify the simultaneous protocol under write.json.
-Also save plots/data exports hybrid_simultaneous.png and hybrid_simultaneous.json.
+Simultaneous resonance supports transmon to atom, atom to transmon, or both
+independent directions in the Output menu. The checkbox preserves the selected
+direction when switching between sequential and simultaneous protocols.
+Write starts with a transmon input, maps to the atom, and then applies STORAGE.
+Read starts with an independently prepared atomic input, applies STORAGE first,
+excites both memory arms to Rydberg states, exchanges through the shared cavity,
+and returns the atom to h0. Both couplings remain active throughout.
+Fidelity is the unconditional joint overlap with |g,0,atomic target> for write
+or |transmon target,0,h0> for read. One noiseless phase reference per direction
+is shared across all inputs; read calibration includes the storage hold.
+Each direction has its own controls, detuning, dynamics, summary and 3D joint
+output figure. Read trace time starts after storage. Nonzero experimental
+tolerances add sampled shaded ranges and a With tolerances summary column
+in both directions. The same fixed-error grid as sequential transfer is used;
+pulse timings, couplings, optical carriers and phase references remain nominal.
+Ranges are sampled extrema, not confidence intervals or guaranteed bounds.
+Assistant numerical reports use write.json and read.json. Optional saved exports
+use hybrid_simultaneous.png/json for write and hybrid_simultaneous_read.png/json
+for read, so running both does not overwrite the first direction.
 CLI: python hybrid_memory_fixed/backend.py --run --simultaneous
+Add --simultaneous-direction read or --simultaneous-direction both as needed.
 Unattended: add --no-show; numerical exports: add --save.
 Checks: python -m unittest discover -s hybrid_memory_fixed -p 'test_simultaneous.py'
 
@@ -508,3 +519,17 @@ pause during a long solver call. The bar reaches 100% when results and figures
 are ready, before blocking plot windows close. New runs reset it to zero.
 Stopping or failing a calculation preserves its last percentage.
 CLI --progress emits structured HYBRID_PROGRESS events for panel consumption.
+
+Stopping a calculation:
+The panel Stop calculation button requests a cooperative stop at the next
+solver output sample or calculation stage. Completed figures remain open,
+and the latest available trajectory is plotted through its last calculated
+sample, with the calculation stage and stopped status in the title. This
+may be a calibration or logical-input trajectory, as identified by the stage.
+Partial trajectories are not final transfer fidelities. The report folder
+contains stopped_trajectory.png and stopped_trajectory.json when available.
+Parameter sweeps retain completed points and show the interrupted trajectory.
+If stopped before any samples are available, the console reports that fact.
+Run becomes available again as soon as calculation stops or finishes. Starting
+a new simulation automatically closes the previous run's plot windows. Closing
+the panel also closes its active simulation and result windows.

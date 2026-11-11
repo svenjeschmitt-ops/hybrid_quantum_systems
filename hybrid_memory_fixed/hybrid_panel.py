@@ -44,8 +44,9 @@ MODES = [
 ("Both transfer directions", []),
 ("Transmon to atom", ["--write-only"]),
 ("Atom to transmon", ["--retrieve"]),
+("Simultaneous cavity resonance: both directions", ["--simultaneous", "--simultaneous-direction", "both"]),
 ("Simultaneous cavity resonance: transmon to atom", ["--simultaneous"]),
-("Tolerance scan: best and worst sampled", ["--tolerance-scan"]),
+("Simultaneous cavity resonance: atom to transmon", ["--simultaneous", "--simultaneous-direction", "read"]),
 ]
 
 
@@ -148,7 +149,7 @@ SECTION_EQUATIONS = {
         "the first ideal transfer maximum for an initial e,0,r0 state; ramps, exchange during optical pulses, losses and spectator interactions can shift it. "
         "Unequal couplings limit ideal transfer; unity requires equal coupling magnitudes. "
         "This output writes to atomic memory and includes the configured storage hold. "
-        "Tolerance bounds are not scanned in this mode; the output explicitly reports nominal results.",
+        "Experimental tolerances apply in both directions, with nominal controls and phase calibration fixed. Plots show sampled ranges.",
     ),
     "Cavity and transmon": (
         (
@@ -283,8 +284,10 @@ class ParameterPanel:
             backend_path=folder/("backend.py" if (folder/"backend.py").exists() else "codetest.py")
         self.backend_path=Path(backend_path).resolve()
         self.process=None
+        self.plot_processes=[]
         self.events=queue.Queue()
         self.temp_path=None
+        self.stop_path=None
         self.last_run=None
         self.assistant_request=0
         self.assistant_cancel=threading.Event()
@@ -437,15 +440,18 @@ class ParameterPanel:
         if self.simultaneous_enabled.get():
             sweeping=self.sweep_enabled.get()=="On"
             self.sweep_enabled.set("Off")
-            self.mode.set("Simultaneous cavity resonance: transmon to atom")
+            direction = {"Both transfer directions": "both directions", "Transmon to atom": "transmon to atom",
+                         "Atom to transmon": "atom to transmon"}.get(self.mode.get(), "both directions")
+            self.mode.set("Simultaneous cavity resonance: " + direction)
             self.status.set("Simultaneous resonance is on. Set hold/ramp below; constant-control options are in the transmon and atom tabs."
                             + (" Parameter sweep was turned off for this output." if sweeping else ""))
         else:
-            self.mode.set("Transmon to atom")
-            self.status.set("Simultaneous resonance is off. Sequential transmon-to-atom transfer selected.")
+            direction = self.mode.get().removeprefix("Simultaneous cavity resonance: ")
+            self.mode.set({"both directions": "Both transfer directions", "atom to transmon": "Atom to transmon"}.get(direction, "Transmon to atom"))
+            self.status.set("Simultaneous resonance is off. Sequential transfer selected.")
 
     def sync_simultaneous_mode(self,*_):
-        enabled=self.mode.get()=="Simultaneous cavity resonance: transmon to atom"
+        enabled=self.mode.get().startswith("Simultaneous cavity resonance:")
         self.simultaneous_enabled.set(enabled)
         if enabled:
             if self.sweep_enabled.get()=="On":
@@ -745,7 +751,7 @@ class ParameterPanel:
                     f"Simultaneous exchange: flux {resonance['interaction_flux']:.6g}; "
                     f"voltage {resonance['interaction_voltage_V']:.6g} V; "
                     f"hold {config['SIM_HOLD_SCALE']*resonance['reference_hold_us']:.6g} us; "
-                    f"detunings TC {resonance['transmon_detuning_MHz']:+.6g}, AC {resonance['atom_detuning_MHz']:+.6g} MHz. Nominal results.")
+                    f"detunings TC {resonance['transmon_detuning_MHz']:+.6g}, AC {resonance['atom_detuning_MHz']:+.6g} MHz. Configured tolerances are included.")
                 return True
             self.status.set(
                 f"Model checks passed. Swap detuning TC/AC: "
@@ -776,9 +782,10 @@ class ParameterPanel:
             self.temp_path.unlink(missing_ok=True)
             messagebox.showerror("Could not prepare simulation output",str(exc))
             return
+        self.stop_path=Path(report_directory)/"stop_requested"
         # An explicit --run bypasses the startup panel in the child.
         command=[sys.executable,"-u",str(self.backend_path),
-                 "--run","--progress","--config",str(self.temp_path),"--assistant-output",report_directory,*mode_args]
+                 "--run","--progress","--stop-file",str(self.stop_path),"--config",str(self.temp_path),"--assistant-output",report_directory,*mode_args]
         if self.save.get():
             command.append("--save")
         try:
@@ -788,6 +795,7 @@ class ParameterPanel:
             self.temp_path.unlink(missing_ok=True)
             messagebox.showerror("Could not start simulation",str(exc))
             return
+        self.close_previous_plots()
         self.progress.set(0)
         self.progress_label.set("0%")
         self.run_button.configure(state="disabled")
@@ -799,14 +807,42 @@ class ParameterPanel:
                                     "step":self.sweep_step.get(),"direction":mode_args[mode_args.index("--sweep-direction")+1]}
         self.numerical_status.set("Numerical reports are being calculated for this run. Ask after a figure is ready.")
         self.stop_button.configure(state="normal")
-        self.status.set("Calculating. Selected plot windows will open when ready; close them to finish the run.")
+        self.status.set("Calculating. Starting another run will replace these plots.")
         self.append("\n--- New simulation ---\n")
         threading.Thread(target=self.read_output,args=(self.process,),daemon=True).start()
 
     def read_output(self,process):
         for line in process.stdout:
-            self.events.put(("line",line))
-        self.events.put(("done",process.wait()))
+            self.events.put(("line",(process,line)))
+        self.events.put(("done",(process,process.wait())))
+
+    def close_previous_plots(self):
+        """Each previous result window belongs to its completed child process."""
+        for process in self.plot_processes:
+            if process.poll() is None:
+                try:
+                    if os.name=="posix":
+                        os.killpg(process.pid,signal.SIGTERM)
+                    else:
+                        process.terminate()
+                except ProcessLookupError:
+                    pass
+        self.plot_processes=[]
+
+    def release_calculation(self,status,message):
+        """Release the Run button while the child continues displaying figures."""
+        self.plot_processes=[p for p in self.plot_processes if p.poll() is None]
+        if self.process is not None:
+            self.plot_processes.append(self.process)
+            self.process=None
+        if self.last_run is not None:
+            self.last_run["status"]=status
+        self.run_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
+        self.status.set(message)
+        if self.temp_path:
+            self.temp_path.unlink(missing_ok=True)
+            self.temp_path=None
 
     def handle_progress(self,line):
         event=parse_progress_line(line)
@@ -817,18 +853,27 @@ class ParameterPanel:
         self.progress_label.set(f"{int(percent)}%")
         if self.last_run is not None:
             self.last_run["progress_percent"]=percent
-        self.status.set("100% — simulation ready. Close plot windows to finish the run." if percent>=100
-                        else "Calculating: "+event["label"])
+        if percent>=100:
+            self.release_calculation("finished","Simulation ready. Starting a new run will close these plots.")
+        else:
+            self.status.set("Calculating: "+event["label"])
         return True
 
     def poll(self):
         try:
             while True:
                 kind,value=self.events.get_nowait()
+                if kind in ("line","done"):
+                    process,value=value
+                    if process is not self.process:
+                        # Plot-only children may exit after a newer run starts.
+                        continue
                 if kind=="line":
                     if self.handle_progress(value):
                         continue
                     self.append(value)
+                    if value.startswith("Calculation stopped."):
+                        self.release_calculation("stopped","Calculation stopped. Starting a new run will close these plots.")
                     if self.last_run is not None:
                         if value.startswith("Full parameter sweep results:"):
                             self.numerical_status.set("Parameter sweep results available. Files: "+self.last_run["output_directory"])
@@ -859,13 +904,14 @@ class ParameterPanel:
                         self.progress.set(100)
                         self.progress_label.set("100%")
                     if self.last_run is not None:
-                        self.last_run["status"]="finished" if value==0 else "stopped or failed"
+                        self.last_run["status"]="finished" if value==0 else "stopped" if value==3 else "failed"
                         folder=Path(self.last_run["output_directory"])
-                        available=[name for name in ("write","read","roundtrip","tolerance_scan","parameter_sweep") if (folder/(name+".json")).is_file()]
+                        available=[name for name in ("write","read","roundtrip","tolerance_scan","parameter_sweep","stopped_trajectory") if (folder/(name+".json")).is_file()]
                         self.numerical_status.set("Numerical reports available: "+", ".join(available)+". Files: "+str(folder)
                                                   if available else "No numerical reports were produced for this run.")
                     self.status.set("Run finished. Edit parameters and run again." if value==0
-                                    else "Run stopped or failed.")
+                                    else "Calculation stopped. Available figures were shown." if value==3
+                                    else "Run failed.")
                     self.run_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
                     if self.temp_path:
@@ -877,26 +923,26 @@ class ParameterPanel:
 
     def stop(self):
         if self.process and self.process.poll() is None:
-            if os.name=="posix":
-                try:
-                    os.killpg(self.process.pid,signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            else:
-                self.process.terminate()
-            self.status.set("Stopping calculation...")
+            self.stop_path.touch()
+            if self.last_run is not None:
+                self.last_run["status"]="stopping"
+            self.stop_button.configure(state="disabled")
+            self.status.set("Stopping calculation and preparing available figures...")
 
     def close(self):
-        if self.process and self.process.poll() is None:
-            if not messagebox.askyesno("Close simulation panel","Stop the active run and close the panel?"):
+        processes=[p for p in [self.process,*self.plot_processes]
+                   if p is not None and p.poll() is None]
+        if processes:
+            if not messagebox.askyesno("Close simulation panel","Close the active simulation and its plot windows?"):
                 return
-            if os.name=="posix":
-                try:
-                    os.killpg(self.process.pid,signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            else:
-                self.process.terminate()
+            for process in processes:
+                if os.name=="posix":
+                    try:
+                        os.killpg(process.pid,signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.terminate()
         self.assistant_cancel.set()
         if self.temp_path:
             self.temp_path.unlink(missing_ok=True)

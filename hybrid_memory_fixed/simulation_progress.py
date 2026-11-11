@@ -16,6 +16,8 @@ def enable(value=True):
 
 
 def update(fraction, label, complete=False):
+    import simulation_stop
+    simulation_stop.stage(label)
     if _enabled:
         percent = 100 * max(0, min(1, _base + _span * max(0, min(1, fraction))))
         if not complete:

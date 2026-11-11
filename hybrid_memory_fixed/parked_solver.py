@@ -7,6 +7,7 @@ small populations or normalizing away loss/leakage.
 from types import SimpleNamespace
 import numpy as np
 import qutip as qt
+import simulation_stop as stopping
 from scipy.linalg import expm
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import expm_multiply
@@ -31,6 +32,8 @@ class ParkedSolver:
         values = vector.full().ravel()
         active = [(indices, matrix) for indices, matrix in self.blocks
                   if np.any(values[indices] != 0)]
+        stopping.begin()
+        stopping.sample(times[0], rho)
         states = [rho.copy()]
         # Cache repeated step sizes only within one run, bounding retained memory.
         propagators = {}
@@ -47,4 +50,5 @@ class ParkedSolver:
                     values[indices] = expm_multiply(matrix*dt, values[indices])
             state_vector = qt.Qobj(values[:, None], dims=vector.dims)
             states.append(qt.vector_to_operator(state_vector))
+            stopping.sample(times[len(states)-1], states[-1])
         return SimpleNamespace(states=states, times=times)

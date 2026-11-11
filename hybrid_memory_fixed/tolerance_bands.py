@@ -43,7 +43,8 @@ def final_metrics(b, state, mode, fidelity, before_fidelity, basis):
 
 def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
             nominal_fidelity, nominal_final, source='hyperfine',
-            nominal_state=None, nominal_basis=None):
+            nominal_state=None, nominal_basis=None, evaluator=None,
+            control_sampler=None, before_index=-1):
     """Reuse nominal data; evolve selected and logical inputs at each error point.
 
     Min/max at each time may come from different offset combinations. These
@@ -55,13 +56,14 @@ def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
         raise ValueError('Tolerance summaries require the nominal final state and basis fidelities.')
     target = (alpha * b.g + beta * b.e).unit()
     points = list(scenarios(config))
+    sample_controls = (lambda: control_sampler(times)) if control_sampler else (lambda: controls(b, times, mode, source))
     values = dict(populations=np.asarray(nominal_pops), fidelity=np.asarray(nominal_fidelity),
-                  **controls(b, times, mode, source))
+                  **sample_controls())
     low = {key: np.array(value, copy=True) for key, value in values.items()}
     high = {key: np.array(value, copy=True) for key, value in values.items()}
     endpoints = [dict(offsets=points[0], final_fidelity=float(nominal_final),
                       metrics=final_metrics(b, nominal_state, mode, nominal_final,
-                                            nominal_fidelity[-1], nominal_basis))]
+                                            nominal_fidelity[before_index], nominal_basis))]
     print(f'{mode}: calculating tolerance bands for {len(points)} fixed-error points. '
           'Lines are nominal; shaded bands are sampled pointwise ranges.', flush=True)
     ops = (b.Pe, b.n, b.Ph0, b.Ph1, b.Pr0, b.Pr1, b.Plost, b.Pwrong)
@@ -69,25 +71,28 @@ def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
     for index, offsets in enumerate(points[1:], start=2):
         print(f'{mode} tolerance point {index}/{len(points)}: {offsets}', flush=True)
         with progress.scope((index-2)/(len(points)-1), (index-1)/(len(points)-1), f"Tolerance scenario {index}/{len(points)}"), fixed_offsets(b, offsets):
-            if mode == 'write':
-                grid, states = b.simulate(alpha, beta, noisy=True, include_storage=False)
-                effect = b.atomic_storage_effect(target, phase)
-                fidelity = np.real(b.qt.expect(effect, states))
-                final_state = b.hold_memory(states[-1])
-                final = float(np.real(b.qt.expect(effect, final_state)))
+            if evaluator is not None:
+                grid, states, fidelity, final_state, final, basis = evaluator()
             else:
-                initial = b.stored_retrieval_initial(alpha, beta, source)
-                grid, states, _, _, _ = b.evolve_read(initial, source=source)
-                fidelity = np.asarray(b.read_metrics(states, target, phase)[2])
-                final_state = states[-1]
-                final = float(fidelity[-1])
+                if mode == 'write':
+                    grid, states = b.simulate(alpha, beta, noisy=True, include_storage=False)
+                    effect = b.atomic_storage_effect(target, phase)
+                    fidelity = np.real(b.qt.expect(effect, states))
+                    final_state = b.hold_memory(states[-1])
+                    final = float(np.real(b.qt.expect(effect, final_state)))
+                else:
+                    initial = b.stored_retrieval_initial(alpha, beta, source)
+                    grid, states, _, _, _ = b.evolve_read(initial, source=source)
+                    fidelity = np.asarray(b.read_metrics(states, target, phase)[2])
+                    final_state = states[-1]
+                    final = float(fidelity[-1])
+                with progress.scope(.5, .95, "Tolerance logical inputs"):
+                    _, _, basis = b.basis_probabilities(mode, source=source, phase=phase, storage=(mode == 'write'))
             if not np.array_equal(grid, times):
                 raise ValueError('Tolerance trajectories must share the nominal time grid.')
-            with progress.scope(.5, .95, "Tolerance logical inputs"):
-                _, _, basis = b.basis_probabilities(mode, source=source, phase=phase, storage=(mode == 'write'))
-            metrics = final_metrics(b, final_state, mode, final, fidelity[-1], basis)
+            metrics = final_metrics(b, final_state, mode, final, fidelity[before_index], basis)
             sample = dict(populations=np.real([b.qt.expect(op, states) for op in ops]),
-                          fidelity=fidelity, **controls(b, times, mode, source))
+                          fidelity=fidelity, **sample_controls())
         for key, value in sample.items():
             low[key] = np.minimum(low[key], value)
             high[key] = np.maximum(high[key], value)

@@ -13,6 +13,7 @@ import uuid
 
 from hybrid_settings import FIELDS, validate, derived
 import simulation_progress as progress
+import simulation_stop as stopping
 
 SWEEP_FIELDS = [row for row in FIELDS
                 if row[0] not in ('Experimental tolerances', 'Simultaneous resonance', 'Numerics')
@@ -164,10 +165,14 @@ def run(backend, config, parameter, start, stop, step, direction='both',
                     config_path.write_text(json.dumps(point), encoding='utf-8')
                     command = [sys.executable, '-u', str(Path(backend.__file__).resolve()),
                                '--run', '--config', str(config_path), '--sweep-point', str(point_path),
-                               '--sweep-direction', direction, '--no-show']
+                               '--sweep-direction', direction, '--no-show', '--assistant-output', str(folder)]
                     env = {**os.environ, 'MPLBACKEND': 'Agg',
                            **progress.child_environment(.95*index/len(points), .95*(index+1)/len(points))}
-                    subprocess.run(command, check=True, env=env)
+                    try:
+                        subprocess.run(command, check=True, env=env)
+                    except subprocess.CalledProcessError:
+                        stopping.check()
+                        raise
                 data = json.loads(point_path.read_text(encoding='utf-8'))
                 row = {parameter: value, **{d+'_fidelity': data['directions'][d]['final_fidelity'] for d in directions}}
                 for d in directions:

@@ -26,6 +26,7 @@ from multilevel import parse_manifold
 from parked_solver import ParkedSolver
 from population_labels import resolved_population_labels, population_legend
 import simulation_progress as progress
+import simulation_stop as stopping
 
 _ASSISTANT_OUTPUT = None
 
@@ -348,9 +349,9 @@ def simulate(alpha, beta, noisy=True, include_storage=True):
         "max_step": MAX_STEP, "nsteps": 100000,
     }
     if noisy:
-        result = qt.mesolve(H, qt.ket2dm(psi), ts, c_ops=C_OPS, options=options)
+        result = stopping.solve(qt.mesolve, H, qt.ket2dm(psi), ts, c_ops=C_OPS, options=options)
     else:
-        result = qt.sesolve(H, psi, ts, options=options)
+        result = stopping.solve(qt.sesolve, H, psi, ts, options=options)
     return ts, result.states
 
 def calibrated_phase():
@@ -688,7 +689,7 @@ def isolated_preparation(duration, dipole_ratio=REL_WRONG_DIPOLE,
     h = [TWOPI * split_mhz * w * w.dag(), [B + B.dag(), drive]]
     # Resolve the optical detuning and the pulse envelope independently.
     step = min(duration / 100, 1 / (30 * max(abs(split_mhz), 1))) / resolution
-    result = qt.sesolve(
+    result = stopping.solve(qt.sesolve,
         h, b, np.linspace(0, duration, 301),
         e_ops=[b * b.dag(), r * r.dag(), w * w.dag()],
         options={"method": "dop853", "atol": 1e-12, "rtol": 1e-10,
@@ -866,10 +867,10 @@ def evolve_read(initial, noisy=True, source="hyperfine", step=MAX_STEP):
     options = {"store_states": True, "atol": 1e-11, "rtol": 1e-9,
                "method": "dop853", "max_step": step, "nsteps": 100000}
     if not noisy and initial.isket:
-        result = qt.sesolve(h_read, initial, ts, options=options)
+        result = stopping.solve(qt.sesolve, h_read, initial, ts, options=options)
     else:
         rho = qt.ket2dm(initial) if initial.isket else initial
-        result = qt.mesolve(h_read, rho, ts, c_ops=C_OPS if noisy else [],
+        result = stopping.solve(qt.mesolve, h_read, rho, ts, c_ops=C_OPS if noisy else [],
                             options=options)
     return ts, result.states, stages, flux_read, voltage_read
 
@@ -952,8 +953,8 @@ def retrieval_effect(target, phase, noisy=True):
     def reverse_generator(t):
         return adjoint(duration - t)
 
-    result = qt.mesolve(qt.QobjEvo(reverse_generator), effect,
-                        [0.0, duration], options={
+    result = stopping.solve(qt.mesolve, qt.QobjEvo(reverse_generator), effect,
+                        [0.0, duration], _capture=False, options={
                             "method": "dop853", "max_step": MAX_STEP,
                             "atol": 1e-11, "rtol": 1e-9,
                             "nsteps": 100000, "normalize_output": False,
@@ -1384,7 +1385,7 @@ def paper_figure(save=False, show=True):
              + TWOPI * (F_A_ZERO-FC+K_R1*field**2) * Pr1
              + TWOPI * (F_WRONG_SPLIT+K_WRONG*field**2) * Pwrong_base
              + sum((op * coeff(0) for op, coeff in extra_atomic_terms(lambda t: field)), 0*Pr0))
-        result = qt.mesolve(
+        result = stopping.solve(qt.mesolve,
             H, qt.ket2dm(psi), ts, c_ops=C_OPS, e_ops=[Pr1],
             options={"method":"dop853", "atol":1e-11, "rtol":1e-9,
                      "max_step":MAX_STEP, "nsteps":100000},
@@ -1673,10 +1674,16 @@ def write_paper_figure(save=False, show=True):
         plt.show(block=True)
 
 
-def simultaneous_main(save=False):
-    """Write to memory with both transitions resonant with the cavity together."""
+def simultaneous_main(save=False, direction="write"):
+    """Transfer in either or both directions with simultaneous cavity exchange."""
     from simultaneous_coupling import run
-    return run(sys.modules[__name__], save=save)
+    if direction != "both":
+        return run(sys.modules[__name__], save=save, direction=direction)
+    results = {}
+    for index, mode in enumerate(("write", "read")):
+        with progress.scope(index/2, (index+1)/2, "Simultaneous " + mode):
+            results[mode] = run(sys.modules[__name__], save=save, direction=mode)
+    return results
 
 
 def all_figures(save=False):
@@ -1699,6 +1706,7 @@ if __name__ == "__main__":
         launch(backend_path=Path(__file__).resolve())
         raise SystemExit(0)
     parser = argparse.ArgumentParser()
+    parser.add_argument("--stop-file", help=argparse.SUPPRESS)
     parser.add_argument("--progress", action="store_true", help="Emit structured panel progress.")
     parser.add_argument("--parameter-sweep", action="store_true", help="Sweep one model input and compare write/read fidelities.")
     parser.add_argument("--sweep-parameter", default="PHI_SWAP")
@@ -1707,7 +1715,8 @@ if __name__ == "__main__":
     parser.add_argument("--sweep-step", type=float, default=0.001)
     parser.add_argument("--sweep-direction", choices=("both", "write", "read"), default="both")
     parser.add_argument("--sweep-point", help=argparse.SUPPRESS)
-    parser.add_argument("--simultaneous", action="store_true", help="Write with simultaneous transmon/atom/cavity resonance.")
+    parser.add_argument("--simultaneous", action="store_true", help="Transfer with simultaneous transmon/atom/cavity resonance.")
+    parser.add_argument("--simultaneous-direction", choices=("write", "read", "both"), default="write")
     parser.add_argument("--tolerance-scan", action="store_true", help="Scan fixed +/- tolerances and show sampled best/worst fidelity.")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--leakage-scan", action="store_true")
@@ -1730,8 +1739,9 @@ if __name__ == "__main__":
     parser.add_argument("--assistant-output", help="Directory for run-specific numerical assistant reports.")
     parser.add_argument("--write-only", action="store_true", help="Only the transmon-to-atom transfer figure.")
     args = parser.parse_args()
+    if args.stop_file:
+        os.environ["HYBRID_STOP_FILE"] = args.stop_file
     progress.enable(args.progress or os.environ.get("HYBRID_SIM_PROGRESS")=="1")
-    progress.update(0, "Preparing simulation")
     _ASSISTANT_OUTPUT = args.assistant_output
     selected_modes = sum((args.paper_figure, args.retrieve, args.roundtrip,
                           args.leakage_scan, args.all_figures, args.write_paper_figure, args.write_only, args.tolerance_scan, args.simultaneous, args.parameter_sweep, bool(args.sweep_point)))
@@ -1746,46 +1756,55 @@ if __name__ == "__main__":
               f"atom-cavity={diagnostics['atom_swap_detuning_MHz']:.6g}", flush=True)
         print(f"{'Manual' if _SETTINGS['DIRECT_COUPLING'] else 'Calculated'} g_TC / 2pi: {G_TC/TWOPI:.6g} MHz; "
               f"g_AC / 2pi: {G_AC/TWOPI:.6g} MHz", flush=True)
-    if args.sweep_point:
-        from parameter_sweep import evaluate_point, atomic_json
-        directions = ("write", "read") if args.sweep_direction == "both" else (args.sweep_direction,)
-        atomic_json(args.sweep_point, evaluate_point(sys.modules[__name__], directions))
-    elif args.parameter_sweep:
-        import parameter_sweep
-        try:
-            parameter_sweep.run(sys.modules[__name__], _SETTINGS,
-                                args.sweep_parameter, args.sweep_start, args.sweep_stop,
-                                args.sweep_step, args.sweep_direction, save=args.save,
-                                output_directory=_ASSISTANT_OUTPUT)
-        except ValueError as exc:
-            parser.error(str(exc))
-    elif args.simultaneous:
-        try:
-            simultaneous_main(save=args.save)
-        except ValueError as exc:
-            parser.error(str(exc))
-    elif args.tolerance_scan:
-        import tolerance_scan
-        tolerance_scan.run(sys.modules[__name__], _SETTINGS, save=args.save,
-                           output_directory=_ASSISTANT_OUTPUT)
-    elif args.all_figures or (selected_modes == 0 and not args.check):
-        all_figures(save=args.save)
-    elif args.write_only:
-        main(check=args.check, save=args.save)
-    elif args.write_paper_figure:
-        write_paper_figure(save=args.save, show=False)
-    elif args.paper_figure:
-        paper_figure(save=args.save, show=False)
-    elif args.retrieve or args.roundtrip:
-        retrieval_main(args.source, args.roundtrip, args.check, save=args.save)
-    elif args.leakage_scan:
-        leakage_scan(save=args.save)
-    else:
-        main(args.check, save=args.save)
+    stopped = False
+    try:
+        progress.update(0, "Preparing simulation")
+        if args.sweep_point:
+            from parameter_sweep import evaluate_point, atomic_json
+            directions = ("write", "read") if args.sweep_direction == "both" else (args.sweep_direction,)
+            atomic_json(args.sweep_point, evaluate_point(sys.modules[__name__], directions))
+        elif args.parameter_sweep:
+            import parameter_sweep
+            try:
+                parameter_sweep.run(sys.modules[__name__], _SETTINGS,
+                                    args.sweep_parameter, args.sweep_start, args.sweep_stop,
+                                    args.sweep_step, args.sweep_direction, save=args.save,
+                                    output_directory=_ASSISTANT_OUTPUT)
+            except ValueError as exc:
+                parser.error(str(exc))
+        elif args.simultaneous:
+            try:
+                simultaneous_main(save=args.save, direction=args.simultaneous_direction)
+            except ValueError as exc:
+                parser.error(str(exc))
+        elif args.tolerance_scan:
+            import tolerance_scan
+            tolerance_scan.run(sys.modules[__name__], _SETTINGS, save=args.save,
+                               output_directory=_ASSISTANT_OUTPUT)
+        elif args.all_figures or (selected_modes == 0 and not args.check):
+            all_figures(save=args.save)
+        elif args.write_only:
+            main(check=args.check, save=args.save)
+        elif args.write_paper_figure:
+            write_paper_figure(save=args.save, show=False)
+        elif args.paper_figure:
+            paper_figure(save=args.save, show=False)
+        elif args.retrieve or args.roundtrip:
+            retrieval_main(args.source, args.roundtrip, args.check, save=args.save)
+        elif args.leakage_scan:
+            leakage_scan(save=args.save)
+        else:
+            main(args.check, save=args.save)
 
-    progress.update(1, "Simulation ready", complete=True)
+        progress.update(1, "Simulation ready", complete=True)
+    except stopping.CalculationStopped:
+        stopped = True
+        stopping.show_available(sys.modules[__name__], _ASSISTANT_OUTPUT)
     if not args.no_show and not args.check:
         # Blocking interactive windows: close the windows to finish the run.
         plt.show(block=True)
     else:
         plt.close("all")
+
+    if stopped:
+        raise SystemExit(stopping.STOP_EXIT_CODE)
