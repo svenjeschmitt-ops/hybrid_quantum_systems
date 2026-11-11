@@ -7,42 +7,34 @@ import numpy as np
 import simulation_progress as progress
 import qutip as qt
 
-from hybrid_settings import validate, coupling_strengths
+from hybrid_settings import validate, coupling_strengths, resonant_flux, resonant_field, calculated_swap_field, calculated_transmon_frequency
 from simulation_output import trace, write_report
 
 
 def resonance_settings(settings):
-    """Find reachable bare resonance controls without modifying saved inputs."""
+    """Use entered constant controls; auto-tune only controls that remain pulsed."""
     c = validate(settings)
-    ej = (c['FC'] + c['EC'])**2 / (8*c['EC'])
-    ratio = ej/c['EJ_MAX']
-    if not c['ASYMMETRY'] <= ratio <= 1:
-        raise ValueError('Simultaneous resonance: cavity frequency is outside the transmon tuning range.')
-    cos2 = (ratio**2-c['ASYMMETRY']**2)/(1-c['ASYMMETRY']**2)
-    phi = float(np.arccos(np.sqrt(np.clip(cos2, 0, 1)))/np.pi)
-    stark = c['K_R1']-c['K_R0']
-    if stark == 0:
-        if not np.isclose(c['F_A_ZERO'], c['FC'], rtol=0, atol=1e-9):
-            raise ValueError('Simultaneous resonance: equal Stark coefficients cannot tune the atom to the cavity.')
-        field = c['E_PARK']
-    else:
-        field2 = (c['FC']-c['F_A_ZERO'])/stark
-        if field2 < 0:
-            raise ValueError('Simultaneous resonance: the atomic Stark model cannot reach the cavity frequency.')
-        magnitude = float(np.sqrt(field2))
-        field = min((magnitude, -magnitude), key=lambda x: abs(x-c['E_PARK']))
-    # Use the charge matrix element at resonance, rather than the sequential peak.
+    try:
+        phi = c["PHI_SWAP"] if c["CONSTANT_FLUX"] else resonant_flux(c)
+        field = calculated_swap_field(c) if c["CONSTANT_FIELD"] else resonant_field(c)
+    except ValueError as exc:
+        raise ValueError(f'Simultaneous resonance: {exc}') from exc
+    # Evaluate the coupling at the actual interaction flux, including detuned constants.
     rates = coupling_strengths(dict(c, PHI_SWAP=phi))
     gt, ga = [2*np.pi*rates[key] for key in ('transmon_coupling_MHz', 'atom_coupling_MHz')]
-    return dict(resonant_flux=phi, resonant_field_V_per_cm=field,
-                resonant_voltage_V=c['GAP_CM']*(field-c['STRAY_FIELD']),
+    dt = calculated_transmon_frequency(c, phi)-c['FC']
+    da = c['F_A_ZERO']+(c['K_R1']-c['K_R0'])*field**2-c['FC']
+    return dict(interaction_flux=phi, interaction_field_V_per_cm=field,
+                transmon_detuning_MHz=dt, atom_detuning_MHz=da,
+                on_resonance=bool(abs(dt)<1e-8 and abs(da)<1e-8),
+                interaction_voltage_V=c['GAP_CM']*(field-c['STRAY_FIELD']),
                 g_TC_rad_per_us=gt, g_AC_rad_per_us=ga,
                 reference_hold_us=np.pi/np.hypot(gt, ga),
                 ideal_transfer_limit=4*(gt*ga/(gt*gt+ga*ga))**2)
 
 
 def plateau(t, start, hold, ramp):
-    """Smooth synchronous ramps with a genuinely flat resonant plateau."""
+    """A flat resonant interval with smooth ramps from and back to park."""
     u = t-start
     if u <= 0 or u >= 2*ramp+hold:
         return 0.0
@@ -54,10 +46,12 @@ def plateau(t, start, hold, ramp):
 
 
 def model(b, include_storage=True):
-    """Build an independent Hamiltonian; sequential globals are never retimed."""
+    """Shared exchange pulse with independently optional constant controls."""
     c = b._SETTINGS
     info = resonance_settings(c)
-    ramp = c['SIM_RAMP']
+    constant_flux = bool(c['CONSTANT_FLUX'])
+    constant_field = bool(c['CONSTANT_FIELD'])
+    ramp = 0.0 if constant_flux and constant_field else c['SIM_RAMP']
     hold = c['SIM_HOLD_SCALE']*info['reference_hold_us']
     prep = (0.0, b.T_OPT)
     start = prep[1]+b.GAP
@@ -65,17 +59,18 @@ def model(b, include_storage=True):
     mapping = (end+b.GAP, end+b.GAP+b.T_OPT)
     finish = mapping[1]+(b.STORAGE if include_storage else 0.0)
 
-    def weight(t):
-        return plateau(t, start, hold, ramp)
-
     def flux(t):
-        return b.PHI_PARK+(info['resonant_flux']-b.PHI_PARK)*weight(t)
+        if constant_flux:
+            return info['interaction_flux']
+        return b.PHI_PARK+(info['interaction_flux']-b.PHI_PARK)*plateau(t, start, hold, ramp)
 
     def field(t):
-        return b.E_PARK+(info['resonant_field_V_per_cm']-b.E_PARK)*weight(t)
+        if constant_field:
+            return info['interaction_field_V_per_cm']
+        return b.E_PARK+(info['interaction_field_V_per_cm']-b.E_PARK)*plateau(t, start, hold, ramp)
 
     def voltage(t):
-        return b.GAP_CM*(field(t)-b.STRAY_FIELD)
+        return c['V_SWAP'] if constant_field else b.GAP_CM*(field(t)-b.STRAY_FIELD)
 
     def dt(t):
         return b.TWOPI*(b.transmon_frequency(flux(t))-b.FC)
@@ -89,18 +84,23 @@ def model(b, include_storage=True):
     def dw(t):
         return b.TWOPI*(b.F_WRONG_SPLIT+b.K_WRONG*field(t)**2)
 
+    # Optical carriers follow the field used during preparation and mapping.
+    optical_r0 = d0(0)
+    optical_r1 = d1(0)
+
     def prep_drive(t):
-        return .5*b.optical_envelope(t, *prep)*np.exp(-1j*b.D_R0_PARK*(t-prep[0]))
+        return .5*b.optical_envelope(t, *prep)*np.exp(-1j*optical_r0*(t-prep[0]))
 
     def map0(t):
-        return .5*b.optical_envelope(t, *mapping)*np.exp(1j*b.D_R0_PARK*(t-mapping[0]))
+        return .5*b.optical_envelope(t, *mapping)*np.exp(1j*optical_r0*(t-mapping[0]))
 
     def map1(t):
-        return .5*b.optical_envelope(t, *mapping)*np.exp(1j*b.D_R1_PARK*(t-mapping[0]))
+        return .5*b.optical_envelope(t, *mapping)*np.exp(1j*optical_r1*(t-mapping[0]))
 
     gt, ga = info['g_TC_rad_per_us'], info['g_AC_rad_per_us']
     interaction = gt*(b.a.dag()*b.sm+b.a*b.sm.dag()) + ga*(b.a*b.Rplus+b.a.dag()*b.Rplus.dag())
-    terms = [interaction, [b.Pe, dt], [b.Pr0, d0], [b.Pr1, d1], [b.Pwrong, dw]]
+    terms = [interaction + b.H_anharm, [b.Nt, dt], [b.Pr0, d0], [b.Pr1, d1], [b.Pwrong_base, dw],
+             *b.extra_atomic_terms(field)]
     for op, coeff in ((b.Bprep, prep_drive), (b.Bmap0, map0), (b.Bmap1, map1)):
         terms.extend([[op, coeff], [op.dag(), lambda t, f=coeff: np.conj(f(t))]])
     h = qt.QobjEvo(terms)
@@ -108,7 +108,8 @@ def model(b, include_storage=True):
         *prep, start, start+ramp, end-ramp, end, *mapping])]
     if include_storage and b.STORAGE:
         points.append(np.linspace(mapping[1], finish, 301))
-    info.update(hold_us=hold, ramp_us=ramp, mapping_end_us=mapping[1],
+    info.update(hold_us=hold, ramp_us=ramp, constant_flux=constant_flux,
+                constant_field=constant_field, continuous_resonance=constant_flux and constant_field and info['on_resonance'], mapping_end_us=mapping[1],
                 stages={'Preparation': prep, 'Simultaneous exchange': (start, end),
                         'Optical mapping': mapping, 'Storage': (mapping[1], finish)})
     return h, np.unique(np.concatenate(points)), info, flux, voltage, field
@@ -118,7 +119,7 @@ def simulate(b, alpha, beta, noisy=True, include_storage=True, storage_solver=No
     h, times, info, *_ = model(b, include_storage)
     initial = qt.tensor((alpha*b.g+beta*b.e).unit(), qt.basis(b.NC, 0), b.h0)
     options = dict(store_states=True, atol=1e-11, rtol=1e-9, method='dop853',
-                   max_step=min(b.MAX_STEP, b._SETTINGS['SIM_RAMP']/4), nsteps=100000)
+                   max_step=min(b.MAX_STEP, info['ramp_us']/4) if info['ramp_us'] else b.MAX_STEP, nsteps=100000)
     dynamics_times = times[times <= info['mapping_end_us']]
     if noisy:
         result = qt.mesolve(h, qt.ket2dm(initial), dynamics_times, c_ops=b.C_OPS, options=options)
@@ -127,13 +128,12 @@ def simulate(b, alpha, beta, noisy=True, include_storage=True, storage_solver=No
     states = list(result.states)
     storage_times = times[times > info['mapping_end_us']]-info['mapping_end_us']
     if len(storage_times):
-        parked = h(info['mapping_end_us'])
+        storage_hamiltonian = h(info['mapping_end_us'])
         if noisy:
-            solver = storage_solver or qt.MESolver(parked, b.C_OPS, options={
-                'method': 'diag', 'normalize_output': False, 'store_states': True})
+            solver = storage_solver or b.ParkedSolver(storage_hamiltonian, b.C_OPS)
             held = solver.run(states[-1], np.r_[0., storage_times]).states
         else:
-            held = qt.sesolve(parked, states[-1], np.r_[0., storage_times],
+            held = qt.sesolve(storage_hamiltonian, states[-1], np.r_[0., storage_times],
                              options=options).states
         states.extend(held[1:])
     return times, states, info
@@ -149,8 +149,7 @@ def run(b, save=False):
     theta, phi = np.deg2rad([b._SETTINGS['INPUT_THETA'], b._SETTINGS['INPUT_PHI']])
     alpha, beta = np.cos(theta/2), np.exp(1j*phi)*np.sin(theta/2)
     h, _, setup, *_ = model(b)
-    storage_solver = (qt.MESolver(h(setup['mapping_end_us']), b.C_OPS, options={
-        'method': 'diag', 'normalize_output': False, 'store_states': True}) if b.STORAGE else None)
+    storage_solver = (b.ParkedSolver(h(setup['mapping_end_us']), b.C_OPS) if b.STORAGE else None)
     times, states, info = simulate(b, alpha, beta, storage_solver=storage_solver)
     target = qt.tensor(b.g, qt.basis(b.NC, 0), rotation.dag()*(alpha*b.h0+beta*b.h1))
     fidelity = np.real(qt.expect(target.proj(), states))
@@ -177,13 +176,15 @@ def run(b, save=False):
                    joint_fidelity_after_storage=float(fidelity[-1]), calibrated_phase_rad=phase,
                    **{k: v for k, v in info.items() if k != 'stages'})
     progress.update(.90, 'Building simultaneous resonance figure')
-    print('Simultaneous shared-cavity resonance (nominal controls; no tolerance scan).', flush=True)
-    print(f"Resonant flux={info['resonant_flux']:.9g}; voltage={info['resonant_voltage_V']:.9g} V", flush=True)
+    print(f'Simultaneous resonance (nominal): constant flux={info["constant_flux"]}; constant field={info["constant_field"]}.', flush=True)
+    print(f"Interaction flux={info['interaction_flux']:.9g}; voltage={info['interaction_voltage_V']:.9g} V", flush=True)
     print(f"g_TC/2pi={info['g_TC_rad_per_us']/b.TWOPI:.6g} MHz; g_AC/2pi={info['g_AC_rad_per_us']/b.TWOPI:.6g} MHz", flush=True)
-    print(f"Hold={info['hold_us']:.6g} us; ideal flat-hold transfer limit={info['ideal_transfer_limit']:.6f}", flush=True)
+    print(f"Hold={info['hold_us']:.6g} us; ideal resonant transfer reference={info['ideal_transfer_limit']:.6f}", flush=True)
     print(f'Joint fidelity after mapping={fidelity[index]:.6f}; after storage={fidelity[-1]:.6f}', flush=True)
     _, _, _, flux, voltage, field = model(b)
+    summary['multilevel_dynamics'] = b.multilevel_summary(states)
     traces = {
+        'multilevel_populations': trace(times, **b.multilevel_metrics(states)),
         'populations': trace(times, **pops),
         'joint_fidelity': trace(times, fidelity=fidelity),
         'controls': trace(times, flux=[flux(t) for t in times], voltage_V=[voltage(t) for t in times]),
@@ -223,26 +224,28 @@ def run(b, save=False):
     detuning_axis.set(title='Detuning from cavity', ylabel='Detuning (MHz)')
     detuning_axis.legend(fontsize=8)
     transfer = times <= info['mapping_end_us']
-    for name, label in zip(names, ('Transmon e', 'Cavity photons', 'h0', 'h1',
-                                  'r0', 'r1', 'Loss', 'Wrong Rydberg')):
+    for name, label in zip(names, ('Transmon e |1>', 'Cavity photons', 'h0', 'h1',
+                                  'r0', 'r1', 'Loss', 'Unwanted Rydberg total')):
         population_axis.plot(times[transfer], pops[name][transfer], label=label)
     population_axis.set(ylabel='Population / photon number', title='Write transfer dynamics')
-    population_axis.legend(fontsize=8, ncol=2)
+    b.plot_resolved_populations(population_axis, times, states, transfer)
+    b.population_legend(population_axis)
     held_coherence = float(2*abs(states[-1].ptrace(2)[0, 1]))
     rows = [
         ['Total write time (preparation through mapping)', f"{info['mapping_end_us']*1000:.2f} ns"],
         ['Storage hold after writing', f'{b.STORAGE:g} µs'],
         ['Total write + storage duration', f"{info['mapping_end_us']+b.STORAGE:.6g} µs"],
-        ['Simultaneous exchange pulse (including ramps)', f"{(info['hold_us']+2*info['ramp_us'])*1000:.2f} ns"],
-        ['Resonant hold', f"{info['hold_us']*1000:.2f} ns"],
-        ['Ideal flat-hold exchange limit', f"{info['ideal_transfer_limit']:.2%}"],
+        ['Exchange hold', f"{info['hold_us']*1000:.2f} ns"],
+        ['Flux control', 'Constant entered value' if info['constant_flux'] else 'Pulsed from park'],
+        ['Electric field control', 'Constant entered value' if info['constant_field'] else 'Pulsed from park'],
+        ['Ideal resonant reference (initial e,0,r0)', f"{info['ideal_transfer_limit']:.2%}"],
         ['Joint fidelity: g → h0', f"{basis[0]['joint_fidelity_after_storage']:.2%}"],
         ['Joint fidelity: e → h1', f"{basis[1]['joint_fidelity_after_storage']:.2%}"],
         ['Joint fidelity: + → +', f"{basis[2]['joint_fidelity_after_storage']:.2%}"],
         ['Selected input: fidelity before storage', f'{fidelity[index]:.2%}'],
         ['Selected input: fidelity after storage', f'{fidelity[-1]:.2%}'],
         ['Selected input: atomic coherence 2|ρ(h0,h1)|', f'{held_coherence:.6f}'],
-        ['Selected input: residual transmon e', f"{pops['transmon_excited'][-1]:.3e}"],
+        ['Selected input: residual transmon e |1>', f"{pops['transmon_excited'][-1]:.3e}"],
         ['Selected input: residual mean cavity photons', f"{pops['cavity_photons'][-1]:.3e}"],
         ['Selected input: residual r0 + r1 population', f"{pops['r0'][-1]+pops['r1'][-1]:.3e}"],
         ['Selected input: atomic loss population', f"{pops['loss'][-1]:.3e}"],
@@ -267,13 +270,15 @@ def run(b, save=False):
             if name != 'Storage':
                 ax.axvline(start, color='gray', alpha=.15)
                 ax.axvline(end, color='gray', alpha=.15)
-    fig.suptitle('Simultaneous cavity resonance: transmon to atom (nominal)')
+    fig.suptitle('Simultaneous cavity exchange: transmon to atom (nominal)'
+                 + ('' if info['on_resonance'] else ' — detuned entered controls'))
     fig.canvas.manager.set_window_title('Simultaneous cavity resonance')
     summary.update(displayed_metrics=rows, selected_coherence_after_storage=held_coherence,
                    populations_after_storage={name: float(values[-1]) for name, values in pops.items()})
     if b._ASSISTANT_OUTPUT:
         write_report(b._ASSISTANT_OUTPUT, 'write', b._SETTINGS,
-                     dict(protocol='simultaneous_cavity_resonance', noise_enabled=True,
+                     dict(protocol='simultaneous_cavity_resonance', continuous_resonance=info['continuous_resonance'],
+                          constant_flux=info['constant_flux'], constant_field=info['constant_field'], noise_enabled=True,
                           tolerance_scan=False, input_theta_degrees=b._SETTINGS['INPUT_THETA'],
                           input_phi_degrees=b._SETTINGS['INPUT_PHI'],
                           joint_output_labels=['g,0,h0', 'g,0,h1', 'wrong_rydberg', 'remaining_other'],

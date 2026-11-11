@@ -145,6 +145,8 @@ def draw(bands, flux_axis, detuning_axis, population_axis, read=False):
     # Read figure uses a different order for its nominal population lines.
     order = (0, 1, 4, 5, 2, 3, 7, 6) if read else tuple(range(8))
     for line, index in zip(population_axis.lines[:8], order):
+        if index == 7:  # Unwanted total is omitted; individual levels are shown.
+            continue
         population_axis.fill_between(ts, low['populations'][index], high['populations'][index],
                                      color=line.get_color(), alpha=.18)
     population_axis.set_title(population_axis.get_title() + ' — nominal lines, sampled tolerance bands')

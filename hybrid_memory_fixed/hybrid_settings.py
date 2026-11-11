@@ -1,6 +1,7 @@
 """Shared parameter definitions and mathematical checks for the hybrid model."""
 import json
 import math
+from multilevel import DEFAULT_MANIFOLD, parse_manifold
 from pathlib import Path
 
 # SI constants (e and h are exact; a0 is the Bohr radius in metres).
@@ -15,6 +16,7 @@ FIELDS = [
 ("Cavity and transmon","EC","Charging energy E_C / h","MHz",250.0,"positive"),
 ("Cavity and transmon","EJ_MAX","Maximum Josephson energy / h","MHz",20000.0,"positive"),
 ("Cavity and transmon","ASYMMETRY","SQUID junction asymmetry","dimensionless",0.10,"nonnegative"),
+("Cavity and transmon","CONSTANT_FLUX","Hold flux constant at entered value","",0,"boolean"),
 ("Cavity and transmon","PHI_PARK","Parked transmon flux","Phi/Phi0",0.13284821090062188,"nonnegative"),
 ("Coupling parameters","BETA","Capacitive participation beta","dimensionless",0.04,"positive"),
 ("Coupling parameters","V_ZPF_UV","Cavity zero-point voltage at transmon","uV",0.5,"positive"),
@@ -31,6 +33,7 @@ FIELDS = [
 ("Atom and electrodes","GAP_CM","Electrode separation","cm",0.10,"positive"),
 ("Atom and electrodes","STRAY_FIELD","Static stray electric field","V/cm",0.20,"free"),
 ("Atom and electrodes","V_SWAP","Applied voltage at pulse peak","V",0.3923668021130249,"free"),
+("Atom and electrodes","CONSTANT_FIELD","Hold electric field constant at entered voltage","",0,"boolean"),
 ("Atom and electrodes","E_PARK","Parked total electric field","V/cm",0.0,"free"),
 ("Atom and electrodes","F_WRONG_SPLIT","Unwanted-level frequency separation","MHz",1320.0,"free"),
 ("Atom and electrodes","REL_WRONG_DIPOLE","Relative unwanted optical amplitude","dimensionless",1.0,"nonnegative"),
@@ -58,9 +61,44 @@ FIELDS = [
 ("Simultaneous resonance","SIM_HOLD_SCALE","Resonant hold time multiplier","dimensionless",1.0,"positive"),
 ("Simultaneous resonance","SIM_RAMP","Simultaneous tuning ramp duration","us",0.0005,"positive"),
 ("Numerics","MAX_STEP","Maximum solver time step","us",0.0005,"positive"),
+("Numerics","NT","Number of transmon levels","integer",3,"transmon_integer"),
+("Numerics","RYDBERG_MANIFOLD","Additional Rydberg levels","JSON array",DEFAULT_MANIFOLD,"manifold"),
 ("Numerics","NC","Number of cavity Fock states","integer",3,"integer"),
 ]
 DEFAULTS = {key: default for _,key,_,_,default,_ in FIELDS}
+
+
+def resonant_flux(config):
+    """Positive-branch flux at bare cavity resonance."""
+    ratio = (config['FC']+config['EC'])**2/(8*config['EC']*config['EJ_MAX'])
+    asymmetry = config['ASYMMETRY']
+    if not asymmetry <= ratio <= 1:
+        raise ValueError('Cavity resonance is outside the transmon tuning range.')
+    cos2 = (ratio**2-asymmetry**2)/(1-asymmetry**2)
+    return math.acos(math.sqrt(min(1.0, max(0.0, cos2))))/math.pi
+
+
+def resonant_field(config):
+    """Positive total field in V/cm at bare cavity resonance."""
+    stark = config['K_R1']-config['K_R0']
+    if stark == 0:
+        if not math.isclose(config['F_A_ZERO'], config['FC'], rel_tol=0, abs_tol=1e-9):
+            raise ValueError('Equal Stark coefficients cannot tune the atom to cavity resonance.')
+        return 0.0
+    field2 = (config['FC']-config['F_A_ZERO'])/stark
+    if field2 < 0:
+        raise ValueError('The atomic Stark model cannot reach cavity resonance.')
+    return math.sqrt(field2)
+
+
+def effective_controls(config):
+    """Resolve optional constant controls without changing the saved inputs."""
+    controls = dict(config)
+    if config.get('CONSTANT_FLUX', 0):
+        controls['PHI_PARK'] = config['PHI_SWAP']
+    if config.get('CONSTANT_FIELD', 0):
+        controls['E_PARK'] = calculated_swap_field(config)
+    return controls
 
 
 def transmon_operating_point(config):
@@ -133,6 +171,9 @@ def validate(values):
     config = dict(DEFAULTS)
     config.update(values)
     for _,key,label,_,_,rule in FIELDS:
+        if rule == "manifold":
+            config[key] = json.dumps(parse_manifold(config[key]), sort_keys=True)
+            continue
         try:
             value = float(config[key])
         except (TypeError,ValueError):
@@ -146,6 +187,10 @@ def validate(values):
         if rule == "boolean":
             if value not in (0, 1):
                 raise ValueError(label + " must be 0 (calculated) or 1 (manual).")
+            value = int(value)
+        if rule == "transmon_integer":
+            if value != int(value) or value < 2:
+                raise ValueError("Use at least 2 transmon levels (an integer).")
             value = int(value)
         if rule == "integer":
             if value != int(value) or value < 3:
@@ -168,11 +213,14 @@ def validate(values):
     for label, value in coupling_strengths(config).items():
         if not math.isfinite(value) or value <= 0:
             raise ValueError(label + " must be finite and greater than zero for swap timing.")
+    for phi in (config["PHI_PARK"], config["PHI_SWAP"]):
+        if calculated_transmon_frequency(config, phi) - config["EC"]*(config["NT"]-2) <= 0:
+            raise ValueError("Transmon truncation exceeds the validity of the weakly anharmonic ladder.")
     return config
 
 
 def derived(config):
-    c=validate(config)
+    c=effective_controls(validate(config))
     couplings=coupling_strengths(c)
     operating_point=transmon_operating_point(c)
     differential_stark = c["K_R1"] - c["K_R0"]

@@ -27,8 +27,14 @@ Time is us, ordinary frequency MHz, Hamiltonian angular frequency rad/us.
 FC is the cavity frequency. OMEGA is the optical Rabi frequency divided by 2*pi,
 not the cavity frequency. PHI_SWAP/PHI_PARK are peak/park flux in Phi/Phi0;
 V_SWAP is peak electrode voltage. TC_PULSE_SCALE/AC_PULSE_SCALE stretch the pulses.
-The model has a two-level transmon, NC cavity states and six atomic states:
-h0,h1,r0,r1,loss,wrong. Both TC and AC couplings remain on at all times.
+The model has NT weakly anharmonic transmon levels, NC cavity states, and
+six base atomic states h0,h1,r0,r1,loss,wrong plus RYDBERG_MANIFOLD neighbors.
+NT defaults to 3; the default extra level is wrong_upper. Atomic neighbor
+parameters are illustrative, not a calibrated atomic spectrum. Higher transmon
+levels couple with sqrt(j) ladder matrix elements; their anharmonicity is -EC.
+Transmon e population excludes higher levels; transmon_leakage reports them.
+Wrong-Rydberg population sums wrong and all added atomic neighbors.
+Both TC and AC couplings remain on at all times.
 Flux and electric field follow rounded sin-squared excursions, without a flat hold.
 Pulse duration is scale*(2*RAMP+pi/(2*g)); this is not a guaranteed resonant swap.
 Optical envelopes are sin-squared pi pulses. Noise uses Lindblad loss/dephasing.

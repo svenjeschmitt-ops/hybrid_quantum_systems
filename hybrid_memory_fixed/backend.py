@@ -2,7 +2,8 @@
 
 Units: time us, ordinary frequency MHz, angular frequency rad/us.
 Illustrative parameters; not a calibrated 87Rb level scheme.
-Includes a coherent unwanted Rydberg level and preparation leakage scan.
+Includes a configurable transmon ladder and coherent neighboring atomic levels.
+Default neighbors are illustrative, not an atomic-structure calculation.
 Run: python backend.py  (opens the parameter panel)
 Direct default plots: python backend.py --run
 Summary only: python backend.py --paper-figure
@@ -21,6 +22,9 @@ import qutip as qt
 from pathlib import Path
 from simulation_output import trace, write_report
 import tolerance_bands
+from multilevel import parse_manifold
+from parked_solver import ParkedSolver
+from population_labels import resolved_population_labels, population_legend
 import simulation_progress as progress
 
 _ASSISTANT_OUTPUT = None
@@ -46,12 +50,13 @@ if _config_args.config:
     except (OSError, ValueError) as exc:
         _config_parser.error(f"Cannot load config {_config_args.config!r}: {exc}")
 
-from hybrid_settings import validate, coupling_strengths, derived, calculated_transmon_frequency, calculated_swap_field, transmon_operating_point
+from hybrid_settings import validate, coupling_strengths, derived, calculated_transmon_frequency, calculated_swap_field, transmon_operating_point, effective_controls
 _SETTINGS = validate(_SETTINGS)
+_CONTROL_SETTINGS = effective_controls(_SETTINGS)
 _COUPLINGS = coupling_strengths(_SETTINGS)
 
 def parameter(name, default):
-    return _SETTINGS.get(name, default)
+    return _CONTROL_SETTINGS.get(name, default)
 
 TWOPI = 2 * np.pi
 
@@ -61,7 +66,7 @@ F_T_INTERACTION = transmon_operating_point(_SETTINGS)["transmon_interaction_freq
 EC = parameter("EC", 250.0) # transmon charging energy
 EJ_MAX = parameter("EJ_MAX", 20000.0) # maximum JJ energy
 ASYMMETRY = parameter("ASYMMETRY", 0.10) # asymmetry between JJ
-F_T_PARK = calculated_transmon_frequency(_SETTINGS, _SETTINGS["PHI_PARK"])
+F_T_PARK = calculated_transmon_frequency(_SETTINGS, _CONTROL_SETTINGS["PHI_PARK"])
 # Derived g/(2*pi) in MHz -> angular coupling in rad/us for the Hamiltonian.
 G_TC = TWOPI * _COUPLINGS["transmon_coupling_MHz"]
 G_AC = TWOPI * _COUPLINGS["atom_coupling_MHz"]
@@ -77,7 +82,7 @@ STRAY_FIELD = parameter("STRAY_FIELD", 0.20)
 E_PARK = parameter("E_PARK", 0.0)
 # Applied control voltage is independent of the cavity frequency.
 E_SWAP = calculated_swap_field(_SETTINGS)
-V_SWAP = _SETTINGS["V_SWAP"]
+V_SWAP = _CONTROL_SETTINGS["V_SWAP"]
 
 # Coherence times (us), phenomenological Markovian rates.
 T1_T = parameter("T1_T", 100.0)
@@ -102,9 +107,9 @@ GAP = parameter("GAP", 0.01)
 STORAGE = parameter("STORAGE", 5.0)
 MAX_STEP = parameter("MAX_STEP", 0.0005)
 
-PHI_PARK = _SETTINGS["PHI_PARK"]
+PHI_PARK = _CONTROL_SETTINGS["PHI_PARK"]
 # Applied interaction flux sets the resonance independently of FC.
-PHI_SWAP = _SETTINGS["PHI_SWAP"]
+PHI_SWAP = _CONTROL_SETTINGS["PHI_SWAP"]
 
 def transmon_frequency(phi):
     ej = EJ_MAX * np.sqrt(
@@ -150,25 +155,86 @@ def electrode_voltage(t):
 def electric_field(t):
     return electrode_voltage(t) / GAP_CM + STRAY_FIELD + TOLERANCE_OFFSETS["EFIELD"]
 
-# Hilbert space: two-level transmon, 3 cavity states, 6 atomic states.
+# Hilbert space: weakly anharmonic transmon, truncated cavity, selected atomic levels.
 # Basis: h0, h1, r0, r1, loss, wrong-Rydberg.
 NC = parameter("NC", 3)
-NA = 6
-g, e = qt.basis(2, 0), qt.basis(2, 1)
-h0, h1, r0, r1, lost, wrong = [qt.basis(NA, j) for j in range(NA)]
-IT, IC, IA = qt.qeye(2), qt.qeye(NC), qt.qeye(NA)
+NT = _SETTINGS["NT"]
+EXTRA_LEVELS = parse_manifold(_SETTINGS["RYDBERG_MANIFOLD"])
+NA = 6 + len(EXTRA_LEVELS)
+g, e = qt.basis(NT, 0), qt.basis(NT, 1)
+h0, h1, r0, r1, lost, wrong = [qt.basis(NA, j) for j in range(6)]
+ATOM_STATES = dict(zip(("h0", "h1", "r0", "r1", "lost", "wrong"),
+                       (h0, h1, r0, r1, lost, wrong)))
+ATOM_STATES.update({level["label"]: qt.basis(NA, 6+i)
+                    for i, level in enumerate(EXTRA_LEVELS)})
+IT, IC, IA = qt.qeye(NT), qt.qeye(NC), qt.qeye(NA)
 
 def A(target, source):
     return qt.tensor(IT, IC, target * source.dag())
 
-sm = qt.tensor(g * e.dag(), IC, IA)
+# Oscillator matrix elements: <j-1|b|j> = sqrt(j).
+sm = qt.tensor(qt.destroy(NT), IC, IA)
+Nt = sm.dag() * sm
+H_anharm = -np.pi * EC * Nt * (Nt - qt.tensor(IT, IC, IA))
+Ptransmon_leakage = qt.tensor(IT - g.proj() - e.proj(), IC, IA)
 a = qt.tensor(IT, qt.destroy(NC), IA)
-Pe = sm.dag() * sm
+Pe = qt.tensor(e.proj(), IC, IA)
 n = a.dag() * a
 Ph0, Ph1, Pr0, Pr1, Plost = [A(s, s) for s in (h0, h1, r0, r1, lost)]
-Pwrong = A(wrong, wrong)
-Zt = qt.tensor(e * e.dag() - g * g.dag(), IC, IA)
-Zr, Zh = Pr1 - Pr0, Ph1 - Ph0
+Pwrong_base = A(wrong, wrong)
+Pextra = sum((A(ATOM_STATES[x["label"]], ATOM_STATES[x["label"]])
+              for x in EXTRA_LEVELS), 0 * Pwrong_base)
+Pwrong = Pwrong_base + Pextra
+Zt = 2 * Nt - qt.tensor(IT, IC, IA)
+# Extend the phenomenological Rydberg-pair dephasing to added branch states.
+# The original wrong level retains its existing dephasing convention.
+Zr = Pr1 - Pr0
+for level in EXTRA_LEVELS:
+    state = ATOM_STATES[level["label"]]
+    Zr += (2*level["branch"]-1) * A(state, state)
+Zh = Ph1 - Ph0
+
+
+def extra_atomic_terms(field):
+    """Diagonal neighboring energies in the same frame as their optical arm."""
+    terms = []
+    for level in EXTRA_LEVELS:
+        state = ATOM_STATES[level["label"]]
+        def energy(t, spec=level):
+            branch_energy = (F_A_ZERO + TOLERANCE_OFFSETS["FA"] - FC) if spec["branch"] else 0.0
+            return TWOPI * (branch_energy + spec["offset_MHz"]
+                            + spec["stark_MHz_per_Vcm2"] * field(t)**2)
+        terms.append([A(state, state), energy])
+    return terms
+
+
+def multilevel_metrics(states):
+    """Unconditional leakage; Rydberg occupation during mapping is not logical leakage."""
+    if isinstance(states, qt.Qobj):
+        states = [states]
+    ops = {"transmon_leakage": Ptransmon_leakage,
+           "atom_unwanted_population": Pwrong,
+           "atom_neighbor_wrong": Pwrong_base,
+           **{f"transmon_level_{j}": qt.tensor(qt.basis(NT, j).proj(), IC, IA)
+              for j in range(NT)},
+           **{f"atom_neighbor_{x['label']}": A(ATOM_STATES[x["label"]], ATOM_STATES[x["label"]])
+              for x in EXTRA_LEVELS}}
+    return {name: np.real(qt.expect(op, states)) for name, op in ops.items()}
+
+
+
+def plot_resolved_populations(axis, times, states, selection=None):
+    """Append individual levels; the first eight curves retain their tolerance bands."""
+    times = np.asarray(times)
+    selection = slice(None) if selection is None else selection
+    series = multilevel_metrics(states)
+    for key, label in resolved_population_labels(series).items():
+        axis.plot(times[selection], series[key][selection], "--", label=label)
+
+
+def multilevel_summary(states):
+    return {name: {"final": float(values[-1]), "peak_sampled": float(np.max(values))}
+            for name, values in multilevel_metrics(states).items()}
 
 # Rotating frame: cavity frequency removed; hyperfine reference energies
 # removed separately; lower Rydberg reference is its zero-field energy.
@@ -214,23 +280,34 @@ def map1_conj(t):
 
 # Crucial change: both physical couplings remain present at ALL times.
 Rplus = A(r1, r0)
+for level in EXTRA_LEVELS:
+    for source, strength in level["cavity_from"].items():
+        Rplus += strength * A(ATOM_STATES[level["label"]], ATOM_STATES[source])
 H_coupling = G_TC * (a.dag() * sm + a * sm.dag()) + G_AC * (
     a * Rplus + a.dag() * Rplus.dag()
 )
 # The same laser drives the desired and undesired optical transitions.
 # Hermitian-conjugate terms also allow stimulated return from the wrong state.
 # The reverse r0->h0 mapping pulse can therefore excite h0->wrong as well.
-# Cavity couplings from the wrong state are omitted until specified.
+# Neighboring cavity transitions are included when specified in the manifold.
 Bprep = A(r0, h0) + REL_WRONG_DIPOLE * A(wrong, h0)
 Bmap0 = A(h0, r0) + REL_WRONG_DIPOLE * A(h0, wrong)
 Bmap1 = A(h1, r1)
+for level in EXTRA_LEVELS:
+    state = ATOM_STATES[level["label"]]
+    if level["branch"] == 0:
+        Bprep += level["optical_relative"] * A(state, h0)
+        Bmap0 += level["optical_relative"] * A(h0, state)
+    else:
+        Bmap1 += level["optical_relative"] * A(h1, state)
 H = qt.QobjEvo([ #construction of the hamiltonian 
-    H_coupling, # contrains the transmon-cavity and atom-cavity interactions
+    H_coupling + H_anharm, # contains the transmon-cavity and atom-cavity interactions
     [n, cavity_error], # cavity drift in the fixed nominal rotating frame
-    [Pe, delta_t], # time dependent transmon excitation energy offset
+    [Nt, delta_t], # time dependent transmon excitation energy offset
     [Pr0, delta_r0], # time dependent Rydberg energy offset
     [Pr1, delta_r1],# time dependent Rydberg energy offset
-    [Pwrong, delta_wrong], # time dependent unwanted state
+    [Pwrong_base, delta_wrong], # time dependent unwanted state
+    *extra_atomic_terms(electric_field),
     [Bprep, prep_coeff], # Preparation laser interaction
     [Bprep.dag(), prep_conj], 
     [Bmap0, map0_coeff], # Mapping laser interaction involving h0
@@ -245,6 +322,8 @@ C_OPS = [
     np.sqrt(1 / TAU_R0) * A(lost, r0),
     np.sqrt(1 / TAU_R1) * A(lost, r1),
     np.sqrt(1 / TAU_WRONG) * A(lost, wrong),
+    *[np.sqrt(1 / spec["lifetime_us"]) * A(lost, ATOM_STATES[spec["label"]])
+      for spec in EXTRA_LEVELS],
     np.sqrt(1 / (2 * TPHI_T)) * Zt,
     np.sqrt(1 / (2 * TPHI_R)) * Zr,
     np.sqrt(1 / (2 * TPHI_H)) * Zh,
@@ -422,13 +501,21 @@ def main(check=False, save=False):
     ])
 
     mapping_index = np.argmin(abs(ts - MAP[1]))
-    print(f"Flux park/swap (Phi/Phi0): {PHI_PARK:.6f}, {PHI_SWAP:.6f}")
-    print(f"Voltage park/swap (V): {electrode_voltage(0):.6f}, "
-          f"{GAP_CM * (E_SWAP - STRAY_FIELD):.6f}")
+    if _SETTINGS['CONSTANT_FLUX']:
+        print(f"Constant entered flux (Phi/Phi0): {PHI_SWAP:.6f}; no flux parking")
+    else:
+        print(f"Flux park/swap (Phi/Phi0): {PHI_PARK:.6f}, {PHI_SWAP:.6f}")
+    if _SETTINGS['CONSTANT_FIELD']:
+        print(f"Constant entered field: {E_SWAP:.6f} V/cm; voltage: {V_SWAP:.6f} V; no field parking")
+    else:
+        print(f"Voltage park/swap (V): {electrode_voltage(0):.6f}, "
+              f"{GAP_CM * (E_SWAP - STRAY_FIELD):.6f}")
     prep_index = np.argmin(abs(ts - PREP[1]))
     print(f"Wrong-state population after preparation: {pops[7, prep_index]:.6e}")
     print(f"Peak wrong-state population (sampled): {pops[7].max():.6e}")
     print(f"Final wrong-state population: {pops[7, -1]:.6e}")
+    print(f"Multilevel dimensions: transmon={NT}, cavity={NC}, atom={NA}")
+    print(f"Leakage diagnostics: {multilevel_summary(states)}")
     print(f"Mapping joint transfer fidelity: {fidelity[mapping_index]:.6f}")
     print(f"Final joint transfer fidelity: {fidelity[-1]:.6f}")
     print(f"Final 2|rho_h0,h1|: {coherence[-1]:.6f}")
@@ -494,11 +581,11 @@ def main(check=False, save=False):
     detuning_axis.set(title="Detuning from cavity", ylabel="Detuning (MHz)")
     detuning_axis.legend(fontsize=8)
     transfer = ts <= MAP[1]
-    for line, label in zip(pops, ("Transmon e", "Cavity photons", "h0", "h1",
-                                  "r0", "r1", "Loss", "Wrong Rydberg")):
+    for line, label in zip(pops, ("Transmon e |1>", "Cavity photons", "h0", "h1",
+                                  "r0", "r1", "Loss", "Unwanted Rydberg total")):
         population_axis.plot(ts[transfer], line[transfer], label=label)
     population_axis.set(ylabel="Population / photon number", title="Write transfer dynamics")
-    population_axis.legend(fontsize=8, ncol=2)
+    plot_resolved_populations(population_axis, ts, states, transfer)
     held_coherence = 2 * abs(held_state.ptrace(2)[0, 1])
     held_pops = np.real([qt.expect(op, held_state)
                          for op in (Pe, n, Ph0, Ph1, Pr0, Pr1, Plost, Pwrong)])
@@ -517,7 +604,7 @@ def main(check=False, save=False):
         ["Selected input: fidelity before storage", f"{fidelity[-1]:.2%}"],
         ["Selected input: fidelity after storage", f"{held_fidelity:.2%}"],
         ["Selected input: atomic coherence 2|ρ(h0,h1)|", f"{held_coherence:.6f}"],
-        ["Selected input: residual transmon e", f"{held_pops[0]:.3e}"],
+        ["Selected input: residual transmon e |1>", f"{held_pops[0]:.3e}"],
         ["Selected input: residual mean cavity photons", f"{held_pops[1]:.3e}"],
         ["Selected input: residual r0 + r1 population", f"{held_pops[4] + held_pops[5]:.3e}"],
         ["Selected input: atomic loss population", f"{held_pops[6]:.3e}"],
@@ -526,6 +613,7 @@ def main(check=False, save=False):
     summary_rows = tolerance_bands.table_rows(summary_rows, bands, "write")
     if bands:
         tolerance_bands.draw(bands, control_axis, detuning_axis, population_axis)
+    population_legend(population_axis)
     table = results_table(performance_axis, ["Metric", "Nominal", "With tolerances"],
                           summary_rows, widths=[.58, .16, .26],
                           bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
@@ -569,10 +657,12 @@ def main(check=False, save=False):
                      "displayed_metrics": summary_rows, "selected_fidelity_before_storage": float(fidelity[-1]),
                      "selected_fidelity_after_storage": held_fidelity,
                      "selected_coherence_after_storage": float(held_coherence),
+                     "multilevel_dynamics": multilevel_summary(states),
+                     "multilevel_after_storage": multilevel_summary(held_state),
                      "populations_after_storage": dict(zip(names, held_pops))},
             traces={**tolerance_bands.report_traces(bands),
                     "selected_input_dynamics": trace(ts, joint_fidelity=fidelity,
-                        atomic_coherence_2abs_rho_h0_h1=coherence, **dict(zip(names, pops))),
+                        atomic_coherence_2abs_rho_h0_h1=coherence, **multilevel_metrics(states), **dict(zip(names, pops))),
                     "controls": trace(x, flux_Phi_over_Phi0=[flux(t) for t in x],
                         electrode_voltage_V=[electrode_voltage(t) for t in x],
                         transmon_detuning_MHz=[delta_t(t)/TWOPI for t in x],
@@ -752,9 +842,10 @@ def retrieval_model(source="hyperfine"):
         return np.conj(cleanup_coeff(t))
 
     h_read = qt.QobjEvo([
-        H_coupling,
+        H_coupling + H_anharm,
         [n, cavity_error],
-        [Pe, dt_read], [Pr0, d0_read], [Pr1, d1_read], [Pwrong, dw_read],
+        [Nt, dt_read], [Pr0, d0_read], [Pr1, d1_read], [Pwrong_base, dw_read],
+        *extra_atomic_terms(field_read),
         [Bmap0, unmap0], [Bmap0.dag(), unmap0_conj],
         [Bmap1, unmap1], [Bmap1.dag(), unmap1_conj],
         [Bprep, cleanup_coeff], [Bprep.dag(), cleanup_conj],
@@ -792,9 +883,7 @@ def retrieval_initial(alpha, beta, source="hyperfine"):
 @lru_cache(maxsize=1)
 def parked_storage_solver():
     """Reuse the constant parked Lindblad generator for independent inputs."""
-    return qt.MESolver(H(MAP[1]), C_OPS, options={
-        "method": "diag", "normalize_output": False,
-    })
+    return ParkedSolver(H(MAP[1]), C_OPS)
 
 
 def hold_memory(initial, noisy=True):
@@ -963,11 +1052,9 @@ def storage_fidelity_data():
         print(f"Storage fidelity: {'noisy' if noisy else 'ideal'} six-state sweep…",
               flush=True)
         # All drives vanish after MAP; the remaining Hamiltonian is constant.
-        # Diagonalizing once avoids resolving fast parked detunings at each hold.
+        # Block propagation avoids a dense full-Liouvillian diagonalization.
         parked = H(MAP[1])
-        solver = qt.MESolver(parked, C_OPS if noisy else [], options={
-            "method": "diag", "normalize_output": False,
-        })
+        solver = ParkedSolver(parked, C_OPS if noisy else [])
         values, atomic_values = [], []
         for index, target in enumerate(inputs, start=1):
             print(f"  input {index}/6", flush=True)
@@ -1201,17 +1288,18 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         populations = fig.add_subplot(grid[1, column] if len(cases) > 1 else grid[1, :])
         population_axes.append(populations)
         time_axes.append(populations)
-        for op, name in ((Pe, "Transmon e"), (n, "Cavity photons"),
+        for op, name in ((Pe, "Transmon e |1>"), (n, "Cavity photons"),
                          (Pr0, "r0"), (Pr1, "r1"), (Ph0, "h0"),
-                         (Ph1, "h1"), (Pwrong, "Wrong Rydberg"), (Plost, "Loss")):
+                         (Ph1, "h1"), (Pwrong, "Unwanted Rydberg total"), (Plost, "Loss")):
             populations.plot(case_ts, np.real(qt.expect(op, case_states)), label=name)
         populations.set(ylabel="Population / photon number", title=label)
-        populations.legend(fontsize=8, ncol=2)
+        plot_resolved_populations(populations, case_ts, case_states)
     if bands:
         tolerance_bands.draw(bands, flux_axis, detuning_axis, population_axes[0], read=True)
     # Match population scales without assuming photon number is bounded by one.
     upper = max(ax.get_ylim()[1] for ax in population_axes)
     for ax in population_axes:
+        population_legend(ax)
         ax.set_ylim(-0.03, max(1.03, upper))
     for ax in time_axes:
         ax.set(xlabel="Retrieval time (us)", xlim=(ts[0], ts[-1]))
@@ -1241,11 +1329,12 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
                      "selected_joint_fidelity": float(joint[-1]), "selected_raw_transmon_overlap": float(raw[-1]),
                      "selected_phase_corrected_transmon_overlap": float(corrected[-1]),
                      "selected_transmon_coherence": float(coherence[-1]),
-                     "atomic_joint_before_retrieval_if_roundtrip": atomic_joint},
+                     "atomic_joint_before_retrieval_if_roundtrip": atomic_joint,
+                     "multilevel_dynamics": multilevel_summary(states)},
             traces={**tolerance_bands.report_traces(bands),
                     "selected_input_dynamics": trace(ts, joint_fidelity=joint,
                         raw_transmon_overlap=raw, phase_corrected_transmon_overlap=corrected,
-                        transmon_coherence_2abs_rho_g_e=coherence, **dict(zip(names, output_pops))),
+                        transmon_coherence_2abs_rho_g_e=coherence, **multilevel_metrics(states), **dict(zip(names, output_pops))),
                     "controls": trace(ts, flux_Phi_over_Phi0=[flux_read(t) for t in ts],
                         electrode_voltage_V=[voltage_read(t) for t in ts],
                         transmon_detuning_MHz=transmon_detuning, atom_detuning_MHz=atom_detuning)},
@@ -1290,10 +1379,11 @@ def paper_figure(save=False, show=True):
     psi = qt.tensor(g, qt.basis(NC, 1), r0)
     populations = []
     for field in (E_SWAP, E_PARK):
-        H = (H_coupling + TWOPI * dt * Pe
+        H = (H_coupling + H_anharm + TWOPI * dt * Nt
              + TWOPI * K_R0 * field**2 * Pr0
              + TWOPI * (F_A_ZERO-FC+K_R1*field**2) * Pr1
-             + TWOPI * (F_WRONG_SPLIT+K_WRONG*field**2) * Pwrong)
+             + TWOPI * (F_WRONG_SPLIT+K_WRONG*field**2) * Pwrong_base
+             + sum((op * coeff(0) for op, coeff in extra_atomic_terms(lambda t: field)), 0*Pr0))
         result = qt.mesolve(
             H, qt.ket2dm(psi), ts, c_ops=C_OPS, e_ops=[Pr1],
             options={"method":"dop853", "atol":1e-11, "rtol":1e-9,

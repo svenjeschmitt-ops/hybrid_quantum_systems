@@ -1,3 +1,76 @@
+Multilevel basis (updated defaults)
+==================================
+The transmon now uses NT=3 levels by default (g,e,f), adjustable in Numerics.
+The atomic basis now contains h0,h1,r0,r1,loss,wrong,wrong_upper by default.
+The existing logical qubits remain g/e and h0/h1; all joint fidelities remain
+unconditional, so population outside the target counts as error.
+
+Transmon Hamiltonian in angular units:
+H_T/hbar = delta_T(t)*N - pi*EC*N*(N-1), with EC in MHz.
+Adjacent transition frequencies are f01-j*EC, and cavity exchange/relaxation
+use the truncated oscillator lowering operator with sqrt(j) matrix elements.
+Pe still means ONLY |e><e|. Ptransmon_leakage sums levels j>=2.
+Number-dependent pure dephasing preserves the original g/e Tphi and scales
+higher-level coherences with squared level separation. This is a weakly
+anharmonic approximation, not exact diagonalization of the Josephson circuit.
+Large NT or flux settings outside the transmon regime need a different model.
+
+RYDBERG_MANIFOLD accepts a JSON array (in a settings file) or its JSON text
+(in the Numerics field). Each object specifies exactly:
+  label: unique identifier, distinct from the six original states
+  branch: 0 for a lower/r0-like state; 1 for an upper/r1-like state
+  offset_MHz: zero-field energy offset from r0 (branch 0) or r1 (branch 1)
+  stark_MHz_per_Vcm2: coefficient K in shift/h = K*E^2, E in V/cm
+  lifetime_us: positive lifetime, decaying into the existing loss sink
+  optical_relative: signed real amplitude relative to the h0 optical arm
+                    (branch 0) or the h1 arm (branch 1)
+  cavity_from: for branch 1, a mapping from lower-state labels to signed
+               real amplitudes relative to G_AC; branch 0 uses {}
+Lower labels can be r0, wrong, or other added branch-0 states. Couplings
+are Hermitian and remain active throughout writing, reading, and storage.
+Each neighbor has its own Stark energy, optical excitation, and decay.
+Added states also participate in the existing phenomenological pair dephasing.
+The original wrong level retains its original dephasing convention.
+Wrong-Rydberg plots now sum the original wrong level and every added neighbor.
+Assistant reports include individual transmon/neighbor populations and total
+transmon leakage, with sampled peak/final summaries. Transfer and sweep plots
+show wrong, each added neighbor, transmon g, and each included transmon level
+above e separately. The sum of wrong and all neighbors remains in numerical
+reports and summary metrics; its redundant curve is omitted from the plots.
+
+The default wrong_upper has an illustrative +1320 MHz offset, not a measured
+partner of the original wrong state. NO atomic species, magnetic sublevels,
+selection rules or Stark mixing are inferred. Replace level energies, dipoles,
+Stark coefficients and lifetimes with one consistent physical level scheme.
+Optical intermediate states and a full Stark Hamiltonian remain outside this
+selected-level model. The old fidelity calibration below predates the expanded
+basis and must not be interpreted as validation of every added level scheme.
+
+Example (all extra atomic values are illustrative):
+python hybrid_memory_fixed/backend.py --run --config hybrid_memory_fixed/multilevel_example.json --no-show
+Or load multilevel_example.json from the panel. The example uses four transmon
+levels and nine atomic states. Existing settings missing NT/manifold use the
+new defaults; reset defaults after restarting the panel to see the new fields.
+To recover the original basis, load {"NT": 2, "RYDBERG_MANIFOLD": []}.
+
+For basis convergence, compare NT=2,3,4,... at fixed control settings, then
+successively add physically relevant atomic neighbors. Compare unconditional
+joint fidelity, peak/final leakage and solver-step convergence. The current
+rotating-wave optical/exchange protocol conserves an excitation count including
+h1 and upper-branch atomic levels. For a logical input with at most one
+excitation, higher transmon states can remain exactly unpopulated. Merely
+adding them does not create leakage; thermal preparation, extra drives or
+terms breaking that conservation would be additional physical assumptions.
+
+Parked storage uses exact connected blocks of the constant Lindblad generator,
+without dense full-Liouvillian diagonalization, postselection or renormalization.
+This keeps the larger basis practical while preserving population and coherence.
+Checks: python -m unittest discover -s hybrid_memory_fixed -p 'test_multilevel.py'
+Transmon basis model reference: https://arxiv.org/abs/cond-mat/0703002
+
+Previous workflow notes and original six-state calibration follow.
+----------------------------------------------------------------
+
 Keep backend.py, hybrid_panel.py and hybrid_settings.py in the same folder.
 Start the parameter panel: python backend.py
 Direct plots without the panel: python backend.py --run
@@ -313,21 +386,36 @@ collapse to their nominal values; timing cells still show a dash.
 
 Simultaneous shared-cavity resonance:
 Choose "Simultaneous cavity resonance: transmon to atom" in the Output menu.
-The Simultaneous resonance tab sets the hold multiplier (default 1) and
-sin-squared ramp duration (default 0.0005 us per ramp). The backend prepares
-r0, ramps the transmon and r0-r1 transition onto the same cavity resonance,
-holds both there, returns both controls to park, and maps r0/r1 to h0/h1.
-The configured STORAGE hold follows mapping. Both cavity couplings remain
-active throughout, with the transmon coupling evaluated at the calculated
-resonant flux. The cavity is explicitly simulated; there is no direct
-transmon-atom exchange term. PHI_SWAP, V_SWAP and sequential pulse scales
-are not used by this mode. Unreachable resonance settings raise an error.
+The Simultaneous resonance controls set the hold multiplier (default 1)
+and sin-squared ramp duration (default 0.0005 us). By default both controls
+ramp from park onto shared cavity resonance, hold, and return to park.
 
-The ideal flat-hold reference time is pi/sqrt(g_TC^2+g_AC^2), with angular
-g in rad/us. Its multiplier can be adjusted to account for finite ramps.
+Optional constant controls (available for sequential and simultaneous modes):
+- Cavity and transmon: enable Hold flux constant at entered value (CONSTANT_FLUX=1).
+- Atom and electrodes: enable Hold electric field constant at entered voltage
+  (CONSTANT_FIELD=1).
+These options are independent and default to off. Enable either or both.
+Constant flux uses the entered PHI_SWAP. Constant electric field uses the
+entered V_SWAP / GAP_CM + STRAY_FIELD, so the voltage stays at V_SWAP.
+These values are held during preparation, exchange, mapping and storage,
+including when detuned from the cavity. No automatic retuning is performed.
+Only the corresponding parking input is disabled; the constant value stays editable.
+Optical carriers follow the actual preparation/mapping field. Couplings use
+the active interaction flux. The nominal field includes stray-field compensation.
+In simultaneous mode a control whose option is off retains its park/hold/ramp
+waveform; if both options are on, SIM_RAMP is unused and disabled.
+Only controls that remain pulsed in simultaneous mode require reachable cavity resonance.
+Turning options off restores pulsed controls.
+Both cavity couplings remain active throughout. The cavity is explicitly
+simulated; there is no direct transmon-atom exchange term.
+
+The ideal exchange reference time is pi/sqrt(g_TC^2+g_AC^2), with angular
+g in rad/us, starting from |e,0,r0>. The multiplier sets the resonant plateau
+in simultaneous mode. Ramps and exchange during optical pulses and gaps can
+shift the full protocol optimum. Sequential timing retains the existing scales.
 Even at exact resonance, unequal coupling magnitudes limit ideal exchange
 to 4*g_TC^2*g_AC^2/(g_TC^2+g_AC^2)^2; full exchange requires equal magnitudes.
-The reported limit excludes ramps, dissipation, optical errors and storage.
+The reported limit excludes optical preparation/mapping, dissipation and storage.
 Fidelities use the full joint target |g,0,atomic target>, no postselection,
 and one fixed noise-free phase calibration for every logical input.
 The figure uses the same structure as Transmon to atom: controls and detuning
@@ -405,7 +493,7 @@ voltage continue to set detuning; changing coupling does not retune resonance
 or optimize pulses. Manual-coupling sweeps require manual mode enabled.
 
 Enable Simultaneous resonance in Coupling parameters to reveal its hold
-multiplier and ramp settings in the same tab. The equations, live resonance
+multiplier and ramp duration in the same tab. The separate constant-control options are in the transmon and atom tabs. The equations, live resonance
 summary and Output selection follow the toggle. There is no separate
 Simultaneous resonance tab. Calculated/manual coupling selection and manual
 strengths are retained. Turning the toggle off selects sequential writing.

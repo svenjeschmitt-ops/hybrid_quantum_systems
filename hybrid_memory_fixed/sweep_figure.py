@@ -4,6 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, Slider
+from population_labels import resolved_population_labels, population_legend
 
 
 class SweepFigure:
@@ -81,13 +82,18 @@ class SweepFigure:
         self.detuning_axis.axhline(0, color='gray', alpha=.5, linewidth=.7)
         self.detuning_axis.set(title='Detuning from cavity', ylabel='Detuning (MHz)')
         self.detuning_axis.legend(fontsize=8)
-        for key, label in (('transmon_e', 'Transmon e'), ('cavity_mean_photons', 'Cavity photons'),
+        for key, label in (('transmon_e', 'Transmon e |1>'), ('cavity_mean_photons', 'Cavity photons'),
                            ('atom_h0', 'h0'), ('atom_h1', 'h1'), ('atom_r0', 'r0'),
-                           ('atom_r1', 'r1'), ('atom_loss', 'Loss'), ('atom_wrong_rydberg', 'Wrong Rydberg')):
+                           ('atom_r1', 'r1'), ('atom_loss', 'Loss'), ('atom_wrong_rydberg', 'Unwanted Rydberg total')):
             self.population_axis.plot(dynamics['time_us'], dynamics['series'][key], label=label)
+        resolved = resolved_population_labels(dynamics['series'])
+        for key, label in resolved.items():
+            self.population_axis.plot(dynamics['time_us'], dynamics['series'][key], '--', label=label)
+        if 'transmon_leakage' in dynamics['series'] and not any(key.startswith('transmon_level_') for key in resolved):
+            self.population_axis.plot(dynamics['time_us'], dynamics['series']['transmon_leakage'],
+                                      '--', label='Transmon higher levels')
         self.population_axis.set(title=('Write' if self.direction=='write' else 'Read')+' transfer dynamics',
                                  ylabel='Population / photon number')
-        self.population_axis.legend(ncol=2, fontsize=8)
         for ax in (self.control_axis, self.detuning_axis, self.population_axis):
             ax.set(xlabel='Time (us)' if self.direction=='write' else 'Retrieval time (us)',
                    xlim=(x[0], x[-1]))
@@ -111,6 +117,7 @@ class SweepFigure:
             # Viewer population order is the same in both transfer directions.
             tolerance_bands.draw({'times': np.asarray(tolerance_trace['time_us']), **bounds},
                                  self.control_axis, self.detuning_axis, self.population_axis)
+        population_legend(self.population_axis)
         rows = [row[:3] if tolerance_summary else row[:2]
                 for row in payload['summary']['displayed_metrics']]
         headers = ['Metric', 'Nominal', 'With tolerances'] if tolerance_summary else ['Metric', 'Value']

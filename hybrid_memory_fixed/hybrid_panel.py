@@ -51,6 +51,8 @@ MODES = [
 
 # Symbols use the same notation as the equations beneath each tab.
 PARAMETER_SYMBOLS = {
+    "CONSTANT_FLUX": r"\phi(t)=\phi_{\mathrm{swap}}",
+    "CONSTANT_FIELD": r"E(t)=V_{\mathrm{swap}}/\ell+E_{\mathrm{stray}}",
     "SIM_HOLD_SCALE": r"s_{\mathrm{sim}}",
     "SIM_RAMP": r"T_{\mathrm{ramp,sim}}",
     "FC": r"f_c",
@@ -94,6 +96,8 @@ PARAMETER_SYMBOLS = {
     "INPUT_PHI": r"\varphi",
     "MAX_STEP": r"\Delta t_{\max}",
     "NC": r"N_c",
+    "NT": r"N_T",
+    "RYDBERG_MANIFOLD": r"\mathcal{R}_{extra}",
     "FC_TOL": r"\epsilon_c",
     "FT_TOL": r"\epsilon_T",
     "FA_TOL": r"\epsilon_A",
@@ -134,12 +138,14 @@ SECTION_EQUATIONS = {
             r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{hold}}=s_{\mathrm{sim}}\pi/G$",
             r"$P_{\max}=4g_{TC}^2g_{AC}^2/(g_{TC}^2+g_{AC}^2)^2$",
         ),
-        "Enable Simultaneous resonance in Coupling parameters and set its hold multiplier and ramp duration below. Both controls use sin-squared ramps "
-        "onto a shared flat resonant hold, then return to park before optical mapping. "
-        "Resonant flux and voltage are calculated from the cavity frequency; PHI_SWAP, V_SWAP "
-        "and the sequential pulse multipliers apply only to the sequential modes. "
-        "Calculated coupling is evaluated at the resonant transmon flux; manual mode uses your entered strengths. The hold multiplier starts at "
-        "the first ideal transfer maximum; ramps, losses and spectator interactions can shift it. "
+        "Enable Simultaneous resonance in Coupling parameters and set its hold multiplier and ramp duration below. "
+        "By default both controls ramp from park to a shared resonant hold, then return to park. "
+        "The transmon and atom tabs offer separate constant-control options: each holds that control "
+        "at its entered value through preparation, mapping and storage, without parking or automatic retuning. Enable either or both. "
+        "Pulsed controls are tuned to cavity resonance. Constant controls use PHI_SWAP and V_SWAP, including detuned values. "
+        "Sequential pulse multipliers apply only to sequential modes. Optical carriers follow the actual preparation/mapping field. "
+        "Calculated coupling is evaluated at the actual interaction flux; manual mode uses your entered strengths. The hold multiplier starts at "
+        "the first ideal transfer maximum for an initial e,0,r0 state; ramps, exchange during optical pulses, losses and spectator interactions can shift it. "
         "Unequal couplings limit ideal transfer; unity requires equal coupling magnitudes. "
         "This output writes to atomic memory and includes the configured storage hold. "
         "Tolerance bounds are not scanned in this mode; the output explicitly reports nominal results.",
@@ -151,10 +157,10 @@ SECTION_EQUATIONS = {
             r"$f_{T,\mathrm{int}}=f_T(\phi_{\mathrm{swap}}),\qquad f_{T,\mathrm{park}}=f_T(\phi_{\mathrm{park}})$",
             r"$\Delta_{T,\mathrm{int}}=2\pi(f_{T,\mathrm{int}}-f_c),\qquad \mathrm{resonance}:\ f_{T,\mathrm{int}}=f_c$",
             r"$\phi(t)=\phi_{\mathrm{park}}+[\phi_{\mathrm{swap}}-\phi_{\mathrm{park}}]w_{TC}(t)$",
-            r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)\,\sigma_+\sigma_-$",
+            r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)N_T-\pi\epsilon_C N_T(N_T-1)$",
         ),
         "Energies divided by h are entered in MHz. d is SQUID junction asymmetry. "
-        "Interaction and parked flux inputs use 0 ≤ flux / flux quantum ≤ 0.5. The applied interaction flux sets the calculated transmon frequency independently of f_c. Resonance requires f_T,int = f_c; coupling sets the nominal swap hold. "
+        "Enable Hold flux constant at entered value to use the entered pulse-peak flux in every stage, whether resonant or detuned; parked flux is then unused. Otherwise, interaction and parked flux inputs use 0 ≤ flux / flux quantum ≤ 0.5. The applied interaction flux sets the calculated transmon frequency independently of f_c. Resonance requires f_T,int = f_c; coupling sets the nominal swap hold. "
         "w_TC(t) is a sin-squared excursion, zero outside the pulse and one only at its midpoint. The parked flux sets idle detuning to suppress unwanted exchange while coupling remains active.",
     ),
     "Coupling parameters": (
@@ -186,6 +192,7 @@ SECTION_EQUATIONS = {
             r"$V_{\mathrm{park}}=\ell(E_{\mathrm{park}}-E_{\mathrm{stray}}),\qquad \Delta_A(t)=2\pi[f_A(E(t))-f_c]$",
             r"$\Delta_{w,r0}(E)=2\pi[f_{\mathrm{wrong,split}}+(K_w-K_{r0})E^2],\qquad \Omega_w(t)=\eta\,\Omega(t)$",
         ),
+        "Enable Hold electric field constant at entered voltage to use V_SWAP / electrode separation + stray field in every stage, whether resonant or detuned; parked field is then unused. "
         "ℓ is electrode separation in cm; E is in V/cm and K is in MHz/(V/cm)². "
         "η is relative unwanted optical amplitude.",
     ),
@@ -228,9 +235,12 @@ SECTION_EQUATIONS = {
         (
             r"$\dot\rho=-i[H,\rho]+\sum_k\left(L_k\rho L_k^\dagger-\frac{1}{2}\{L_k^\dagger L_k,\rho\}\right)$",
             r"$i\,\frac{d|\psi\rangle}{dt}=H|\psi\rangle\quad\mathrm{(noiseless)},\qquad \Delta t_{\mathrm{internal}}\leq\Delta t_{\max}=\mathrm{MAX\_STEP}$",
-            r"$D=2\,N_c\,6=12N_c,\qquad n_{\mathrm{cavity}}\in\{0,\ldots,N_c-1\},\qquad N_c\geq3$",
+            r"$D=N_T N_c(6+N_{extra}),\qquad N_T\geq2,\quad N_c\geq3$",
         ),
-        "",
+        "NT sets the weakly anharmonic transmon ladder size. RYDBERG_MANIFOLD is a JSON array "
+        "of additional atomic levels; see multilevel_example.json and README.txt for units and fields. "
+        "Defaults include one illustrative upper neighbor. Set NT=2 and the array to [] for the original basis. "
+        "Compare increasing bases with fixed controls before claiming convergence.",
     ),
 }
 
@@ -317,7 +327,8 @@ class ParameterPanel:
                         parameter_symbol_png(key,dpi=root.winfo_fpixels("1i"))).decode("ascii"))
                 ttk.Label(label_cell,image=self.symbol_images[key]).pack(side="left",padx=(8,0))
                 value=tk.StringVar(value=str(default))
-                entry=ttk.Entry(frame,textvariable=value,width=18)
+                entry=(ttk.Checkbutton(frame,variable=value,onvalue="1",offvalue="0")
+                       if rule == "boolean" else ttk.Entry(frame,textvariable=value,width=18))
                 entry.grid(row=row,column=1,sticky="ew",pady=7)
                 ttk.Label(frame,text=units).grid(row=row,column=2,sticky="w",padx=10)
                 self.entries[key]=value
@@ -377,6 +388,8 @@ class ParameterPanel:
         ttk.Label(progress_row,textvariable=self.progress_label,width=6,anchor="e").pack(side="right",padx=(8,0))
         for value in self.entries.values():
             value.trace_add("write",self.update_swap_rates)
+        for key in ("CONSTANT_FLUX", "CONSTANT_FIELD"):
+            self.entries[key].trace_add("write",self.update_coupling_mode)
         self.mode.trace_add("write",self.sync_simultaneous_mode)
         self.sync_simultaneous_mode()
         self.update_sweep_state()
@@ -425,7 +438,7 @@ class ParameterPanel:
             sweeping=self.sweep_enabled.get()=="On"
             self.sweep_enabled.set("Off")
             self.mode.set("Simultaneous cavity resonance: transmon to atom")
-            self.status.set("Simultaneous resonance is on. Set hold/ramp below, then click Run simulation."
+            self.status.set("Simultaneous resonance is on. Set hold/ramp below; constant-control options are in the transmon and atom tabs."
                             + (" Parameter sweep was turned off for this output." if sweeping else ""))
         else:
             self.mode.set("Transmon to atom")
@@ -451,6 +464,17 @@ class ParameterPanel:
             self.direct_coupling_frame.grid_remove()
         for key in ("BETA","V_ZPF_UV","D_01_EA0","E_ZPF_V_PER_M","DIPOLE_ALIGNMENT"):
             self.input_widgets[key].configure(state="disabled" if manual else "normal")
+        constant_flux=self.entries['CONSTANT_FLUX'].get() in ('1','1.0')
+        constant_field=self.entries['CONSTANT_FIELD'].get() in ('1','1.0')
+        simultaneous=self.simultaneous_enabled.get()
+        for key in ('PHI_PARK', 'PHI_SWAP', 'E_PARK', 'V_SWAP'):
+            constant=constant_flux if key.startswith('PHI') else constant_field
+            unused=(constant if key in ('PHI_PARK','E_PARK') else simultaneous and not constant)
+            self.input_widgets[key].configure(state='disabled' if unused else 'normal')
+        self.input_widgets['SIM_RAMP'].configure(
+            state='disabled' if constant_flux and constant_field else 'normal')
+        for key in ('TC_PULSE_SCALE','AC_PULSE_SCALE','RAMP'):
+            self.input_widgets[key].configure(state='disabled' if simultaneous else 'normal')
         group=("Simultaneous resonance" if self.simultaneous_enabled.get() else
                "Direct coupling" if manual else "Coupling parameters")
         self.equation_images["Coupling parameters"]=tk.PhotoImage(master=self.root,
@@ -636,6 +660,11 @@ class ParameterPanel:
             f"Parked transmon {d['transmon_park_frequency_MHz']:.6g} MHz; "
             f"detuning: {d['transmon_park_frequency_MHz']-config['FC']:+.6g} MHz.\n"
             "Tune the interaction flux to set the transmon resonance frequency.")
+        if config['CONSTANT_FLUX']:
+            self.transmon_tuning.set(
+                f"Constant entered flux: {d['swap_flux']:.6g}.\n"
+                f"Transmon frequency: {d['transmon_interaction_frequency_MHz']:.6g} MHz; detuning: {detuning:+.6g} MHz.\n"
+                "Parked flux is unused; the entered pulse-peak flux stays constant.")
         if self.simultaneous_enabled.get():
             try:
                 from simultaneous_coupling import resonance_settings
@@ -643,13 +672,19 @@ class ParameterPanel:
             except ValueError as exc:
                 self.swap_rates.set(str(exc))
                 return
+            self.transmon_tuning.set(
+                f"Cavity: {config['FC']:.6g} MHz.\n"
+                f"Interaction transmon flux: {resonance['interaction_flux']:.6g}.\n"
+                f"Flux: {'constant entered value' if config['CONSTANT_FLUX'] else 'pulsed from park'}.\n"
+                f"Electric field: {'constant entered value' if config['CONSTANT_FIELD'] else 'pulsed from park'}.")
             self.swap_rates.set(
                 f"{'Manual' if config['DIRECT_COUPLING'] else 'Calculated'} resonant couplings g/(2π): "
                 f"TC {resonance['g_TC_rad_per_us']/(2*math.pi):.5g}; "
                 f"AC {resonance['g_AC_rad_per_us']/(2*math.pi):.5g} MHz.\n"
-                f"Resonant flux {resonance['resonant_flux']:.6g}; voltage {resonance['resonant_voltage_V']:.6g} V.\n"
+                f"Interaction flux {resonance['interaction_flux']:.6g}; voltage {resonance['interaction_voltage_V']:.6g} V.\n"
                 f"Shared hold: {config['SIM_HOLD_SCALE']*resonance['reference_hold_us']:.6g} us; "
-                f"ramp: {config['SIM_RAMP']:.6g} us; ideal exchange limit: {resonance['ideal_transfer_limit']:.6f}.")
+                f"ramp: {0 if config['CONSTANT_FLUX'] and config['CONSTANT_FIELD'] else config['SIM_RAMP']:.6g} us; "
+                f"detunings TC {resonance['transmon_detuning_MHz']:+.6g}, AC {resonance['atom_detuning_MHz']:+.6g} MHz.")
             return
         self.swap_rates.set(
             f"{'Manual' if config['DIRECT_COUPLING'] else 'Calculated'} couplings g/(2π): TC {d['transmon_coupling_MHz']:.5g}; AC {d['atom_coupling_MHz']:.5g} MHz.\n"
@@ -707,10 +742,10 @@ class ParameterPanel:
                 from simultaneous_coupling import resonance_settings
                 resonance=resonance_settings(config)
                 self.status.set(
-                    f"Simultaneous resonance: flux {resonance['resonant_flux']:.6g}; "
-                    f"voltage {resonance['resonant_voltage_V']:.6g} V; "
+                    f"Simultaneous exchange: flux {resonance['interaction_flux']:.6g}; "
+                    f"voltage {resonance['interaction_voltage_V']:.6g} V; "
                     f"hold {config['SIM_HOLD_SCALE']*resonance['reference_hold_us']:.6g} us; "
-                    f"ideal exchange limit {resonance['ideal_transfer_limit']:.6f}. Nominal results.")
+                    f"detunings TC {resonance['transmon_detuning_MHz']:+.6g}, AC {resonance['atom_detuning_MHz']:+.6g} MHz. Nominal results.")
                 return True
             self.status.set(
                 f"Model checks passed. Swap detuning TC/AC: "
