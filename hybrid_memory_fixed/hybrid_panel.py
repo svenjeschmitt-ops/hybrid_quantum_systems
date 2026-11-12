@@ -1,5 +1,6 @@
 """Native startup parameter panel. Keep beside backend.py and hybrid_settings.py."""
 import base64
+from copy import deepcopy
 import io
 import json
 import math
@@ -38,6 +39,9 @@ from tkinter.scrolledtext import ScrolledText
 from hybrid_settings import FIELDS, DEFAULTS, validate, derived
 from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
+from assistant_proposals import parse_proposal, prepare_application
+from assistant_calculations import ComparisonCancelled, reference_only, run_comparison, checked_answer
+from assistant_search import requested_target, run_target_search, search_answer
 from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
@@ -289,6 +293,11 @@ class ParameterPanel:
         self.temp_path=None
         self.stop_path=None
         self.last_run=None
+        self.assistant_history=[]
+        self.assistant_pending=None
+        self.assistant_proposal=None
+        self.assistant_preview=None
+        self._updating_assistant_values=False
         self.assistant_request=0
         self.assistant_cancel=threading.Event()
         root.title("Hybrid quantum memory — simulation parameters")
@@ -463,6 +472,8 @@ class ParameterPanel:
         self.update_swap_rates()
 
     def update_coupling_mode(self,*_):
+        if getattr(self,"_updating_assistant_values",False):
+            return
         manual=self.entries["DIRECT_COUPLING"].get() in ("1","1.0")
         if manual:
             self.direct_coupling_frame.grid()
@@ -568,32 +579,52 @@ class ParameterPanel:
     def build_assistant_tab(self):
         tab=ttk.Frame(self.tabs,padding=12)
         self.tabs.add(tab,text="Assistant")
-        ttk.Label(tab,text="Ask about your settings and simulation output",
-                  font=("",14,"bold")).pack(anchor="w")
-        ttk.Label(tab,text="Each question includes current settings, calculated quantities, "
-                  "and the latest run's numerical plot data and console output.\nQuestions are independent. Answers cannot change parameters "
-                  "or run simulations.",wraplength=900).pack(anchor="w",pady=8)
-        ttk.Label(tab,text="Codex uses ChatGPT sign-in and your plan's usage limits. Settings, output and relevant "
-                  "project files it reads are sent to OpenAI. Read-only project access; API-key billing is disabled.",
-                  wraplength=900).pack(anchor="w",pady=(0,8))
-        self.check_codex_button=ttk.Button(tab,text="Check Codex",command=self.check_codex_connection)
-        self.check_codex_button.pack(anchor="w")
-        self.assistant_status=tk.StringVar(value="Click Check Codex or ask a question. The answer appears when Codex finishes.")
-        ttk.Label(tab,textvariable=self.assistant_status,wraplength=900).pack(anchor="w",pady=8)
-        self.numerical_status=tk.StringVar(value="Run a simulation in this panel to provide numerical plot data.")
-        ttk.Label(tab,textvariable=self.numerical_status,wraplength=900).pack(anchor="w",pady=(0,8))
-        self.assistant_output=ScrolledText(tab,wrap="word",height=12,state="disabled")
-        self.assistant_output.pack(fill="both",expand=True)
-        ttk.Label(tab,text="Your question (up to 1,000 characters):").pack(anchor="w",pady=(8,3))
+        tab.columnconfigure(0,weight=1)
+        tab.rowconfigure(3,weight=1)
+        header=ttk.Frame(tab)
+        header.grid(row=0,column=0,sticky="ew",pady=(0,6))
+        ttk.Label(header,text="Simulation assistant",font=("",14,"bold")).pack(side="left")
+        ttk.Label(header,text="Target (%)").pack(side="left",padx=(18,4))
+        self.fidelity_target=tk.StringVar(value="80")
+        ttk.Entry(header,textvariable=self.fidelity_target,width=6).pack(side="left")
+        ttk.Button(header,text="Search controls",command=self.search_assistant_target).pack(side="left",padx=8)
+        ttk.Button(header,text="Details",command=self.show_assistant_details).pack(side="right")
+        self.check_codex_button=ttk.Button(header,text="Check Codex",command=self.check_codex_connection)
+        self.check_codex_button.pack(side="right",padx=8)
+        ttk.Label(tab,text="Review values before applying · ChatGPT sign-in · Settings and relevant files are sent to OpenAI.",
+                  wraplength=1100).grid(row=1,column=0,sticky="w",pady=(0,6))
+        status=ttk.Frame(tab)
+        status.grid(row=2,column=0,sticky="ew",pady=(0,6))
+        self.assistant_status=tk.StringVar(value="Ready for a question.")
+        ttk.Label(status,textvariable=self.assistant_status,wraplength=1100).pack(anchor="w")
+        self.numerical_status=tk.StringVar(value="Run a simulation to include numerical results.")
+        ttk.Label(status,textvariable=self.numerical_status,wraplength=1100).pack(anchor="w")
+        self.assistant_output=ScrolledText(tab,wrap="word",height=24,state="disabled")
+        self.assistant_output.grid(row=3,column=0,sticky="nsew")
+        ttk.Label(tab,text="Your question (up to 1,000 characters):").grid(row=4,column=0,sticky="w",pady=(8,3))
         self.assistant_question=tk.Text(tab,height=3,wrap="word")
-        self.assistant_question.pack(fill="x")
+        self.assistant_question.grid(row=5,column=0,sticky="ew")
         self.assistant_question.insert("1.0","Explain my current detunings and pulse durations. What should I check before running?")
         buttons=ttk.Frame(tab)
-        buttons.pack(fill="x",pady=8)
+        buttons.grid(row=6,column=0,sticky="ew",pady=(8,0))
         self.ask_button=ttk.Button(buttons,text="Ask assistant",command=self.ask_assistant)
         self.ask_button.pack(side="left")
         self.cancel_answer_button=ttk.Button(buttons,text="Cancel answer",command=self.cancel_answer,state="disabled")
         self.cancel_answer_button.pack(side="left",padx=8)
+        self.test_suggestions=tk.BooleanVar(value=True)
+        ttk.Checkbutton(buttons,text="Test trial values",variable=self.test_suggestions).pack(side="left",padx=8)
+        self.apply_values_button=ttk.Button(buttons,text="Apply suggested values",
+                                           command=self.preview_assistant_values,state="disabled")
+        self.apply_values_button.pack(side="right")
+
+    def show_assistant_details(self):
+        text=("Questions include current settings and the latest run's numerical results. "
+              "The last six exchanges are retained for follow-ups. Suggested values update the panel only after you preview and apply them. Search controls runs a bounded multi-parameter search for the target percentage. Explicit fidelity targets in a question also start this local search. Test trial values compares individual proposals for other questions. Exact bare-resonance references need only formula calculations. The main simulation is started separately.\n\n"
+              "Codex uses ChatGPT sign-in and your plan's usage limits. Settings, output and relevant project files "
+              "are sent to OpenAI. Project access is read-only; API-key billing is disabled.")
+        if self.last_run and self.last_run.get("output_directory"):
+            text+="\n\nNumerical report folder:\n"+self.last_run["output_directory"]
+        messagebox.showinfo("Assistant details",text,parent=self.root)
 
     def assistant_append(self,text):
         self.assistant_output.configure(state="normal")
@@ -612,16 +643,45 @@ class ParameterPanel:
                 self.events.put(("codex_error",str(exc)))
         threading.Thread(target=worker,daemon=True).start()
 
-    def ask_assistant(self):
-        question=self.assistant_question.get("1.0","end").strip()
+    def search_assistant_target(self):
+        try:
+            target=float(self.fidelity_target.get())/100
+            if not 0<target<=1:
+                raise ValueError()
+        except ValueError:
+            self.assistant_status.set("Enter a target greater than 0 and at most 100%.")
+            return
+        self.ask_assistant(target=target)
+
+    def ask_assistant(self,target=None):
+        if self.ask_button.instate(["disabled"]):
+            return
+        question=(f"Find control settings reaching at least {target:.2%} fidelity." if target is not None
+                  else self.assistant_question.get("1.0","end").strip())
         if not question or len(question)>1000:
             self.assistant_status.set("Enter a question between 1 and 1,000 characters.")
             return
         try:
-            messages=build_messages(question,self.config(),self.mode.get(),self.last_run)
+            if target is None:
+                target=requested_target(question)
+            settings=self.config()
+            mode=self.mode.get()
+            last_run=deepcopy(self.last_run)
+            history=deepcopy(self.assistant_history)
+            test_values=self.test_suggestions.get()
+            can_test=self.process is None or self.process.poll() is not None
         except ValueError as exc:
             messagebox.showerror("Check parameters",str(exc))
             return
+        if target is not None and not can_test:
+            self.assistant_status.set("Finish or stop the active calculation before starting a target search.")
+            return
+        self.assistant_proposal=None
+        self.apply_values_button.configure(state="disabled")
+        if self.assistant_preview is not None:
+            self.assistant_preview.destroy()
+            self.assistant_preview=None
+        self.assistant_pending={"question":question,"settings":settings,"mode":mode}
         self.assistant_request+=1
         request_id=self.assistant_request
         self.assistant_cancel=threading.Event()
@@ -629,19 +689,142 @@ class ParameterPanel:
         project_root=self.backend_path.parent.parent
         self.ask_button.configure(state="disabled")
         self.cancel_answer_button.configure(state="normal")
-        self.assistant_status.set("Asking Codex... settings captured when you clicked Ask. The answer appears when Codex finishes.")
-        self.assistant_append(f"\nYou: {question}\nAssistant (Codex):\n")
+        self.assistant_status.set("Starting multi-parameter search..." if target is not None else "Asking Codex...")
+        label="numerical search" if target is not None else "Codex"
+        self.assistant_append(f"\nYou: {question}\nAssistant ({label}):\n")
         def worker():
             try:
+                if target is not None:
+                    result=run_target_search(settings,mode,target,cancelled,project_root,
+                        on_progress=lambda message:self.events.put(("assistant_progress",(request_id,message))))
+                    self.events.put(("assistant_search_result",(request_id,result)))
+                    self.events.put(("assistant_text",(request_id,search_answer(result,settings,mode,target))))
+                    self.events.put(("assistant_done",(request_id,"Target search finished.")))
+                    return
+                messages=build_messages(question,settings,mode,last_run,history)
                 response=codex_answer(messages,cancelled,project_root)
                 for text in response:
+                    if cancelled.is_set():
+                        return
+                    display,proposal,error=parse_proposal(text,settings,mode)
+                    if test_values and proposal and not reference_only(proposal):
+                        if not can_test:
+                            text=display+"\n\nNumerical testing is unavailable while the main calculation is active. Finish or stop it, then ask again. No tested proposal is available."
+                        else:
+                            comparison=run_comparison(proposal,cancelled,project_root,
+                                on_progress=lambda message:self.events.put(("assistant_progress",(request_id,message))))
+                            self.events.put(("assistant_calculation",(request_id,comparison)))
+                            text=checked_answer(proposal,comparison)
                     self.events.put(("assistant_text",(request_id,text)))
-                self.events.put(("assistant_done",(request_id,"Answer finished. Check suggested explanations against simulation results.")))
+                self.events.put(("assistant_done",(request_id,"Answer finished.")))
+            except ComparisonCancelled:
+                return
             except Exception as exc:
-                self.events.put(("assistant_error",(request_id,f"Codex error: {exc}")))
+                if not cancelled.is_set():
+                    self.events.put(("assistant_error",(request_id,f"Assistant request failed: {exc}")))
         threading.Thread(target=worker,daemon=True).start()
 
+    def receive_assistant_answer(self,text):
+        if self.assistant_pending is None:
+            self.assistant_append(text)
+            return
+        captured=self.assistant_pending
+        display,proposal,error=parse_proposal(text,captured["settings"],captured["mode"])
+        self.assistant_proposal=proposal
+        self.apply_values_button.configure(state="normal" if proposal else "disabled")
+        self.assistant_history.append(dict(captured,answer=display,
+                                          suggested_values=proposal["changes"] if proposal else None))
+        self.assistant_history=self.assistant_history[-6:]
+        self.assistant_pending=None
+        self.assistant_append(display)
+        if proposal:
+            self.assistant_append("\n[Suggested values are available for preview.]")
+        elif error:
+            self.assistant_append("\n[Suggested values rejected: "+error+"]")
+
+    def checked_assistant_values(self,proposal):
+        if proposal is not self.assistant_proposal:
+            raise ValueError("This proposal has been replaced. Ask for a fresh proposal.")
+        if self.process is not None and self.process.poll() is None:
+            raise ValueError("Wait for the active calculation to finish or stop before applying values.")
+        return prepare_application(proposal,self.config(),self.mode.get())
+
+    def preview_assistant_values(self):
+        proposal=self.assistant_proposal
+        if proposal is None:
+            return
+        try:
+            changes=self.checked_assistant_values(proposal)
+        except ValueError as exc:
+            self.assistant_status.set(str(exc))
+            return
+        if self.assistant_preview is not None:
+            self.assistant_preview.destroy()
+        preview=tk.Toplevel(self.root)
+        self.assistant_preview=preview
+        preview.title("Review suggested values")
+        preview.transient(self.root)
+        frame=ttk.Frame(preview,padding=12)
+        frame.pack(fill="both",expand=True)
+        ttk.Label(frame,text="Assistant evidence: "+proposal['evidence'],font=("",12,"bold")).pack(anchor="w")
+        ttk.Label(frame,text=proposal['reason'],wraplength=700).pack(anchor="w",pady=(4,10))
+        table_frame=ttk.Frame(frame)
+        table_frame.pack(fill="both",expand=True)
+        table=ttk.Treeview(table_frame,columns=("parameter","current","proposed","units"),
+                           show="headings",height=min(10,len(changes)))
+        for column,title,width in (("parameter","Parameter",200),("current","Current",150),
+                                   ("proposed","Proposed",150),("units","Units",140)):
+            table.heading(column,text=title)
+            table.column(column,width=width)
+        units={key:unit for _,key,_,unit,_,_ in FIELDS}
+        for key,value in changes.items():
+            table.insert("","end",values=(key,proposal['base_settings'][key],value,units[key]))
+        table.pack(side="left",fill="both",expand=True)
+        scrollbar=ttk.Scrollbar(table_frame,orient="vertical",command=table.yview)
+        scrollbar.pack(side="right",fill="y")
+        table.configure(yscrollcommand=scrollbar.set)
+        ttk.Label(frame,text="Applying changes updates the inputs. Start the simulation separately.",
+                  wraplength=700).pack(anchor="w",pady=10)
+        buttons=ttk.Frame(frame)
+        buttons.pack(fill="x")
+        def close():
+            preview.destroy()
+            if self.assistant_preview is preview:
+                self.assistant_preview=None
+        def apply():
+            try:
+                self.apply_assistant_values(proposal)
+            except ValueError as exc:
+                messagebox.showerror("Cannot apply values",str(exc),parent=preview)
+                return
+            close()
+        ttk.Button(buttons,text="Apply values",command=apply).pack(side="right")
+        ttk.Button(buttons,text="Cancel",command=close).pack(side="right",padx=8)
+        preview.protocol("WM_DELETE_WINDOW",close)
+
+    def apply_assistant_values(self,proposal):
+        changes=self.checked_assistant_values(proposal)
+        previous={key:self.entries[key].get() for key in changes}
+        self._updating_assistant_values=True
+        try:
+            for key,value in changes.items():
+                self.entries[key].set(str(value))
+        except Exception as exc:
+            for key,value in previous.items():
+                self.entries[key].set(value)
+            raise ValueError("Could not update panel values: "+str(exc)) from exc
+        finally:
+            self._updating_assistant_values=False
+        self.update_coupling_mode()
+        self.update_swap_rates()
+        self.assistant_proposal=None
+        self.apply_values_button.configure(state="disabled")
+        self.assistant_status.set("Suggested values applied. Run a simulation to evaluate them.")
+        self.status.set("Assistant values applied. Ready to run.")
+        self.assistant_append("\n[Applied to panel: "+", ".join(f"{key}={value}" for key,value in changes.items())+"]\n")
+
     def cancel_answer(self):
+        self.assistant_pending=None
         self.assistant_cancel.set()
         self.assistant_request+=1  # Ignore queued tokens from the cancelled worker.
         self.ask_button.configure(state="normal")
@@ -650,6 +833,8 @@ class ParameterPanel:
         self.assistant_append("\n[Answer cancelled]\n")
 
     def update_swap_rates(self,*_):
+        if getattr(self,"_updating_assistant_values",False):
+            return
         self.update_sweep_preview()
         try:
             config=self.config()
@@ -805,7 +990,7 @@ class ParameterPanel:
             self.last_run["sweep"]={"parameter":self.sweep_labels[self.sweep_parameter.get()],
                                     "start":self.sweep_start.get(),"stop":self.sweep_stop.get(),
                                     "step":self.sweep_step.get(),"direction":mode_args[mode_args.index("--sweep-direction")+1]}
-        self.numerical_status.set("Numerical reports are being calculated for this run. Ask after a figure is ready.")
+        self.numerical_status.set("Calculating numerical results...")
         self.stop_button.configure(state="normal")
         self.status.set("Calculating. Starting another run will replace these plots.")
         self.append("\n--- New simulation ---\n")
@@ -876,12 +1061,11 @@ class ParameterPanel:
                         self.release_calculation("stopped","Calculation stopped. Starting a new run will close these plots.")
                     if self.last_run is not None:
                         if value.startswith("Full parameter sweep results:"):
-                            self.numerical_status.set("Parameter sweep results available. Files: "+self.last_run["output_directory"])
+                            self.numerical_status.set("Parameter sweep results available.")
                         elif value.startswith("Full tolerance results:"):
-                            self.numerical_status.set("Tolerance scan results available. Files: "+self.last_run["output_directory"])
+                            self.numerical_status.set("Tolerance results available.")
                         elif value.startswith("Assistant numerical report ready:"):
-                            self.numerical_status.set("Numerical plot data is available. Ask now, even while plot windows remain open. "
-                                                      "Files: "+self.last_run["output_directory"])
+                            self.numerical_status.set("Numerical plot data available.")
                 elif kind in ("codex_ready","codex_error"):
                     self.check_codex_button.configure(state="normal")
                     self.assistant_status.set(value)
@@ -889,9 +1073,18 @@ class ParameterPanel:
                     request_id,text=value
                     if request_id!=self.assistant_request:
                         continue
-                    if kind=="assistant_text":
-                        self.assistant_append(text)
+                    if kind=="assistant_progress":
+                        self.assistant_status.set(text)
+                    elif kind=="assistant_calculation":
+                        if self.assistant_pending is not None:
+                            self.assistant_pending['numerical_comparison']=text
+                    elif kind=="assistant_search_result":
+                        if self.assistant_pending is not None:
+                            self.assistant_pending['target_search']=text
+                    elif kind=="assistant_text":
+                        self.receive_assistant_answer(text)
                     else:
+                        self.assistant_pending=None
                         self.ask_button.configure(state="normal")
                         self.cancel_answer_button.configure(state="disabled")
                         if kind=="assistant_error":
@@ -907,7 +1100,7 @@ class ParameterPanel:
                         self.last_run["status"]="finished" if value==0 else "stopped" if value==3 else "failed"
                         folder=Path(self.last_run["output_directory"])
                         available=[name for name in ("write","read","roundtrip","tolerance_scan","parameter_sweep","stopped_trajectory") if (folder/(name+".json")).is_file()]
-                        self.numerical_status.set("Numerical reports available: "+", ".join(available)+". Files: "+str(folder)
+                        self.numerical_status.set("Numerical reports: "+", ".join(available)
                                                   if available else "No numerical reports were produced for this run.")
                     self.status.set("Run finished. Edit parameters and run again." if value==0
                                     else "Calculation stopped. Available figures were shown." if value==3

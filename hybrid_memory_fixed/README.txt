@@ -288,6 +288,75 @@ with the OpenAI VS Code/VS Code Insiders extension. PATH installations take
 precedence; the newest executable extension version is selected as a fallback.
 An existing signed-in extension installation does not need a separate CLI install.
 
+Target fidelity search:
+Set Target (%) in the Assistant header and click Search controls. Questions with
+an explicit goal, such as "I want fidelity of at least 80%" or "fidelity is still
+below 80%", also run this local search directly instead of asking the language
+model for another single-parameter guess. Search controls works without a Codex
+request. Cancel answer stops the search worker.
+Sequential searches jointly explore PHI_SWAP, V_SWAP, TC_PULSE_SCALE and
+AC_PULSE_SCALE. Bounds cover reachable resonance-crossing peaks within 200 MHz
+and pulse multipliers 0.4 to 25. Physics-based transferred-calibration seeds,
+staged Powell searches and a bounded differential-evolution fallback are used,
+with at most 320 screening evaluations. Simultaneous searches vary shared hold,
+optical rate, gap, applicable ramp, and constant entered peak controls.
+Noiseless endpoint populations screen candidates efficiently. The application
+then validates up to three candidates using the full ordinary noisy calculations,
+including the requested storage, phase calibration, logical 0/1/+ inputs and
+configured tolerance grid. Cavity frequency, device inputs, noise, storage,
+logical input and basis/solver settings remain fixed. Only a fully validated
+minimum fidelity meeting the requested target produces an Apply proposal.
+A budget limit or a failed candidate is never reported as achieving the target.
+This is a bounded search, not a global optimum or proof for all qubit inputs or
+unsampled errors. Logs, screening trace, full reports and result.json are stored
+under output/assistant_searches. Searches may take several minutes; the worker
+timeout is 40 minutes. Applying found values remains a separate preview/action.
+
+Numerical checks before trial suggestions:
+Test trial values is enabled by default in the Assistant tab. When the assistant
+proposes a concrete control change, the application simulates the captured current
+and proposed configurations in separate background workers before displaying the
+answer. Exact bare-resonance references are already calculated from the model and
+do not require a transfer-performance test.
+The comparison uses the same ordinary or simultaneous model, requested direction(s),
+noise, storage, input, basis, solver settings and tolerance bounds as the panel.
+The score is the minimum logical 0/1/+ joint fidelity across requested directions,
+using sampled tolerance minima if bounds are nonzero. Selected-input fidelities
+are also shown. Each configuration has one noiseless phase reference per direction.
+Only a score increase above 0.001 percentage points enables a tested Apply proposal.
+A worse or effectively unchanged candidate is reported without an Apply proposal.
+This compares two configurations; it is not an optimizer or a guarantee for every
+qubit input. Changing device/noise/storage/input/basis/tolerance assumptions is
+excluded from this automated control comparison. Turn the checkbox off for manual,
+explicitly untested advice. Numerical checks can take minutes; Cancel answer stops
+the worker. Logs, full numerical reports and comparison.json are saved to unique
+output/assistant_checks folders. The numerical timeout is 20 minutes per configuration;
+the separate Codex response timeout remains three minutes. No panel values change
+and no result windows open during testing. Preview/apply remains a separate action.
+
+Applying assistant suggestions:
+When an answer proposes one concrete set of changes, Apply suggested values is
+enabled. Click it to review parameter names, current/proposed values, units,
+reason and evidence category. Click Apply values in that preview to update the
+panel. This does not run a simulation or rewrite previous numerical results.
+Invalid or inactive controls are rejected. Editing settings or changing Output
+since the answer requires a fresh proposal. Values cannot be applied while a
+calculation is active. The assistant CLI still has read-only file access.
+Valid parameter values are not proof of improved transfer; evaluate the proposal
+with Run simulation. Answers without an explicit proposal leave Apply disabled.
+
+The assistant retains the last six completed questions/answers with their captured
+settings for follow-ups. It receives protocol-specific active controls and exact
+bare-resonance references computed by the model. These references are not optimized
+pulse settings. Sequential pulse multipliers are unused in simultaneous mode.
+When the latest run is a sequential parameter sweep, verified point reports with
+matching fixed settings provide the best tested values, ranked by the lowest
+logical 0/1/+ fidelity across the requested directions. Partial sweeps are labeled
+incomplete. These results are not global optima or tolerance worst-case rankings.
+The language model cannot run optimization itself: without matching numerical evidence it
+must distinguish untested trials from measured improvements. Suggested pulse
+changes still require simulation; restoring pulse scales to 1 is not a calibration.
+
 Each question includes validated current inputs, units, calculated quantities,
 and the latest simulation's original settings, mode, status and last 3,000
 characters of console output, separately from current edits. New panel runs
