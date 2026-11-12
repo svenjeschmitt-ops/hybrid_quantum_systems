@@ -10,7 +10,7 @@ import tolerance_bands
 import qutip as qt
 
 from hybrid_settings import validate, coupling_strengths, resonant_flux, resonant_field, calculated_swap_field, calculated_transmon_frequency
-from simulation_output import trace, write_report
+from simulation_output import trace, write_report, real_probability
 
 
 def resonance_settings(settings):
@@ -216,7 +216,7 @@ def run(b, save=False, direction="write"):
         logical_probs = [float(np.real(qt.expect(output.proj(), final))) for output in output_states]
         wrong_prob = float(np.real(qt.expect(b.Pwrong, final)))
         basis.append({'input': label,
-                      'joint_fidelity_final': float(qt.expect(goal.proj(), final)),
+                      'joint_fidelity_final': real_probability(qt.expect(goal.proj(), final)),
                       'joint_output_probabilities': [*logical_probs, wrong_prob,
                                                      1-sum(logical_probs)-wrong_prob]})
     if writing:

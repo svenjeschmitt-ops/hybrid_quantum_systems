@@ -41,7 +41,7 @@ from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
 from assistant_proposals import parse_proposal, prepare_application
 from assistant_calculations import ComparisonCancelled, reference_only, run_comparison, checked_answer
-from assistant_search import requested_target, run_target_search, search_answer
+from assistant_search import requested_target, run_target_search, search_answer, constant_field_requested
 from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
@@ -293,6 +293,7 @@ class ParameterPanel:
         self.temp_path=None
         self.stop_path=None
         self.last_run=None
+        self.assistant_context_run=None
         self.assistant_history=[]
         self.assistant_pending=None
         self.assistant_proposal=None
@@ -589,6 +590,8 @@ class ParameterPanel:
         ttk.Entry(header,textvariable=self.fidelity_target,width=6).pack(side="left")
         ttk.Button(header,text="Search controls",command=self.search_assistant_target).pack(side="left",padx=8)
         ttk.Button(header,text="Details",command=self.show_assistant_details).pack(side="right")
+        self.clear_assistant_button=ttk.Button(header,text="Clear chat",command=self.clear_assistant)
+        self.clear_assistant_button.pack(side="right",padx=8)
         self.check_codex_button=ttk.Button(header,text="Check Codex",command=self.check_codex_connection)
         self.check_codex_button.pack(side="right",padx=8)
         ttk.Label(tab,text="Review values before applying · ChatGPT sign-in · Settings and relevant files are sent to OpenAI.",
@@ -611,6 +614,8 @@ class ParameterPanel:
         self.ask_button.pack(side="left")
         self.cancel_answer_button=ttk.Button(buttons,text="Cancel answer",command=self.cancel_answer,state="disabled")
         self.cancel_answer_button.pack(side="left",padx=8)
+        self.vary_cavity=tk.BooleanVar(value=True)
+        ttk.Checkbutton(buttons,text="Vary cavity frequency",variable=self.vary_cavity).pack(side="left",padx=8)
         self.test_suggestions=tk.BooleanVar(value=True)
         ttk.Checkbutton(buttons,text="Test trial values",variable=self.test_suggestions).pack(side="left",padx=8)
         self.apply_values_button=ttk.Button(buttons,text="Apply suggested values",
@@ -619,12 +624,35 @@ class ParameterPanel:
 
     def show_assistant_details(self):
         text=("Questions include current settings and the latest run's numerical results. "
-              "The last six exchanges are retained for follow-ups. Suggested values update the panel only after you preview and apply them. Search controls runs a bounded multi-parameter search for the target percentage. Explicit fidelity targets in a question also start this local search. Test trial values compares individual proposals for other questions. Exact bare-resonance references need only formula calculations. The main simulation is started separately.\n\n"
+              "The last six exchanges are retained for follow-ups. Clear chat cancels pending assistant work, removes history and suggestions, and excludes old run data until a new simulation is started. Current panel values and saved files are preserved. Suggested values update the panel only after you preview and apply them. Search controls runs a bounded multi-parameter search for the target percentage. Enabled constant-field and constant-flux controls remain exactly fixed across assistant trials. Explicit fidelity targets in a question also start this local search. Test trial values compares individual proposals for other questions. Exact bare-resonance references need only formula calculations. The main simulation is started separately.\n\n"
               "Codex uses ChatGPT sign-in and your plan's usage limits. Settings, output and relevant project files "
               "are sent to OpenAI. Project access is read-only; API-key billing is disabled.")
         if self.last_run and self.last_run.get("output_directory"):
+            if getattr(self,"assistant_context_run",self.last_run) is None:
+                text+="\n\nPrevious run data is not attached to assistant questions."
             text+="\n\nNumerical report folder:\n"+self.last_run["output_directory"]
         messagebox.showinfo("Assistant details",text,parent=self.root)
+
+    def clear_assistant(self):
+        """Start a fresh assistant session without resetting the simulation panel."""
+        self.assistant_cancel.set()
+        self.assistant_request+=1
+        self.assistant_history=[]
+        self.assistant_pending=None
+        self.assistant_proposal=None
+        self.assistant_context_run=None
+        if self.assistant_preview is not None:
+            self.assistant_preview.destroy()
+            self.assistant_preview=None
+        self.assistant_output.configure(state="normal")
+        self.assistant_output.delete("1.0","end")
+        self.assistant_output.configure(state="disabled")
+        self.assistant_question.delete("1.0","end")
+        self.ask_button.configure(state="normal")
+        self.cancel_answer_button.configure(state="disabled")
+        self.apply_values_button.configure(state="disabled")
+        self.assistant_status.set("Chat cleared. Using current panel settings.")
+        self.numerical_status.set("Previous run data excluded. Start a new simulation to attach fresh results.")
 
     def assistant_append(self,text):
         self.assistant_output.configure(state="normal")
@@ -665,10 +693,14 @@ class ParameterPanel:
             if target is None:
                 target=requested_target(question)
             settings=self.config()
+            if target is not None and constant_field_requested(question) and not settings['CONSTANT_FIELD']:
+                self.assistant_status.set("Enable Hold electric field constant at entered value in the atom tab, then search again. Your field settings were not changed.")
+                return
             mode=self.mode.get()
-            last_run=deepcopy(self.last_run)
+            last_run=deepcopy(getattr(self,"assistant_context_run",self.last_run))
             history=deepcopy(self.assistant_history)
             test_values=self.test_suggestions.get()
+            vary_cavity=self.vary_cavity.get() if hasattr(self,"vary_cavity") else False
             can_test=self.process is None or self.process.poll() is not None
         except ValueError as exc:
             messagebox.showerror("Check parameters",str(exc))
@@ -681,7 +713,7 @@ class ParameterPanel:
         if self.assistant_preview is not None:
             self.assistant_preview.destroy()
             self.assistant_preview=None
-        self.assistant_pending={"question":question,"settings":settings,"mode":mode}
+        self.assistant_pending={"question":question,"settings":settings,"mode":mode,"vary_cavity":vary_cavity}
         self.assistant_request+=1
         request_id=self.assistant_request
         self.assistant_cancel=threading.Event()
@@ -695,13 +727,13 @@ class ParameterPanel:
         def worker():
             try:
                 if target is not None:
-                    result=run_target_search(settings,mode,target,cancelled,project_root,
+                    result=run_target_search(settings,mode,target,cancelled,project_root,vary_cavity=vary_cavity,
                         on_progress=lambda message:self.events.put(("assistant_progress",(request_id,message))))
                     self.events.put(("assistant_search_result",(request_id,result)))
                     self.events.put(("assistant_text",(request_id,search_answer(result,settings,mode,target))))
                     self.events.put(("assistant_done",(request_id,"Target search finished.")))
                     return
-                messages=build_messages(question,settings,mode,last_run,history)
+                messages=build_messages(question,settings,mode,last_run,history,vary_cavity=vary_cavity)
                 response=codex_answer(messages,cancelled,project_root)
                 for text in response:
                     if cancelled.is_set():
@@ -711,7 +743,7 @@ class ParameterPanel:
                         if not can_test:
                             text=display+"\n\nNumerical testing is unavailable while the main calculation is active. Finish or stop it, then ask again. No tested proposal is available."
                         else:
-                            comparison=run_comparison(proposal,cancelled,project_root,
+                            comparison=run_comparison(proposal,cancelled,project_root,vary_cavity=vary_cavity,
                                 on_progress=lambda message:self.events.put(("assistant_progress",(request_id,message))))
                             self.events.put(("assistant_calculation",(request_id,comparison)))
                             text=checked_answer(proposal,comparison)
@@ -730,6 +762,9 @@ class ParameterPanel:
             return
         captured=self.assistant_pending
         display,proposal,error=parse_proposal(text,captured["settings"],captured["mode"])
+        if proposal and 'FC' in proposal['changes'] and not captured.get('vary_cavity',False):
+            proposal=None
+            error="Cavity frequency is fixed for this request. Enable Vary cavity frequency and ask again."
         self.assistant_proposal=proposal
         self.apply_values_button.configure(state="normal" if proposal else "disabled")
         self.assistant_history.append(dict(captured,answer=display,
@@ -747,6 +782,8 @@ class ParameterPanel:
             raise ValueError("This proposal has been replaced. Ask for a fresh proposal.")
         if self.process is not None and self.process.poll() is None:
             raise ValueError("Wait for the active calculation to finish or stop before applying values.")
+        if 'FC' in proposal['changes'] and not (hasattr(self,'vary_cavity') and self.vary_cavity.get()):
+            raise ValueError("Cavity-frequency changes are disabled. Enable Vary cavity frequency and ask again.")
         return prepare_application(proposal,self.config(),self.mode.get())
 
     def preview_assistant_values(self):
@@ -986,6 +1023,7 @@ class ParameterPanel:
         self.run_button.configure(state="disabled")
         self.last_run={"settings":run_config,"mode":self.mode.get(),"status":"running","output":"",
                        "output_directory":report_directory}
+        self.assistant_context_run=self.last_run
         if "--parameter-sweep" in mode_args:
             self.last_run["sweep"]={"parameter":self.sweep_labels[self.sweep_parameter.get()],
                                     "start":self.sweep_start.get(),"stop":self.sweep_stop.get(),
@@ -1059,7 +1097,7 @@ class ParameterPanel:
                     self.append(value)
                     if value.startswith("Calculation stopped."):
                         self.release_calculation("stopped","Calculation stopped. Starting a new run will close these plots.")
-                    if self.last_run is not None:
+                    if self.last_run is not None and getattr(self,"assistant_context_run",self.last_run) is self.last_run:
                         if value.startswith("Full parameter sweep results:"):
                             self.numerical_status.set("Parameter sweep results available.")
                         elif value.startswith("Full tolerance results:"):
@@ -1100,8 +1138,9 @@ class ParameterPanel:
                         self.last_run["status"]="finished" if value==0 else "stopped" if value==3 else "failed"
                         folder=Path(self.last_run["output_directory"])
                         available=[name for name in ("write","read","roundtrip","tolerance_scan","parameter_sweep","stopped_trajectory") if (folder/(name+".json")).is_file()]
-                        self.numerical_status.set("Numerical reports: "+", ".join(available)
-                                                  if available else "No numerical reports were produced for this run.")
+                        if getattr(self,"assistant_context_run",self.last_run) is self.last_run:
+                            self.numerical_status.set("Numerical reports: "+", ".join(available)
+                                                      if available else "No numerical reports were produced for this run.")
                     self.status.set("Run finished. Edit parameters and run again." if value==0
                                     else "Calculation stopped. Available figures were shown." if value==3
                                     else "Run failed.")

@@ -45,9 +45,9 @@ def reference_only(proposal):
                for key, value in proposal['changes'].items())
 
 
-def comparison_configs(proposal):
+def comparison_configs(proposal, vary_cavity=False):
     changes = prepare_application(proposal, proposal['base_settings'], proposal['mode'])
-    unsupported = set(changes)-CONTROL_FIELDS
+    unsupported = set(changes)-(CONTROL_FIELDS | ({'FC'} if vary_cavity else set()))
     if unsupported:
         raise ValueError('Automatic comparison keeps the device, input, storage, noise, basis and tolerances fixed. '
                          'Unsupported changes: '+', '.join(sorted(unsupported)))
@@ -99,13 +99,13 @@ def _score(point, mode):
     return min(scores)
 
 
-def compare_results(proposal, baseline, candidate):
-    before, after = comparison_configs(proposal)
+def compare_results(proposal, baseline, candidate, vary_cavity=False):
+    before, after = comparison_configs(proposal,vary_cavity)
     for result, expected in ((baseline, before), (candidate, after)):
         if result['settings'] != expected or result['mode'] != proposal['mode']:
             raise ValueError('Comparison output does not match the requested settings and mode.')
     old, new = _score(baseline, proposal['mode']), _score(candidate, proposal['mode'])
-    return dict(status='complete', mode=proposal['mode'], changes=proposal['changes'],
+    return dict(status='complete', mode=proposal['mode'], vary_cavity=bool(vary_cavity), changes=proposal['changes'],
                 baseline=baseline, candidate=candidate, baseline_score=old, candidate_score=new,
                 gain=new-old, improved=new > old+GAIN_THRESHOLD,
                 objective='Minimum joint fidelity over logical 0, 1 and + inputs across the selected directions; '
@@ -114,10 +114,10 @@ def compare_results(proposal, baseline, candidate):
                            'Each configuration uses its own single noiseless phase calibration per direction.')
 
 
-def run_comparison(proposal, cancelled, project_root, on_progress=None, timeout=1200):
+def run_comparison(proposal, cancelled, project_root, on_progress=None, timeout=1200, vary_cavity=False):
     """Cancellable isolated workers; no parameter writes and no plot windows."""
     from codex_assistant import _stop
-    baseline, candidate = comparison_configs(proposal)
+    baseline, candidate = comparison_configs(proposal,vary_cavity)
     if cancelled.is_set():
         raise ComparisonCancelled()
     root = Path(project_root)/'output'/'assistant_checks'
@@ -162,7 +162,7 @@ def run_comparison(proposal, cancelled, project_root, on_progress=None, timeout=
                 _stop(process)
     if cancelled.is_set():
         raise ComparisonCancelled()
-    result = compare_results(proposal, *outcomes)
+    result = compare_results(proposal, *outcomes,vary_cavity=vary_cavity)
     result['source'] = str((folder/'comparison.json').resolve())
     Path(result['source']).write_text(json.dumps(result, indent=2, allow_nan=False))
     return result
@@ -171,7 +171,7 @@ def run_comparison(proposal, cancelled, project_root, on_progress=None, timeout=
 def checked_answer(proposal, comparison):
     """Present deterministic measured values; keep Apply disabled on regression."""
     # Recheck provenance and scores rather than trusting an external conclusion.
-    verified = compare_results(proposal, comparison['baseline'], comparison['candidate'])
+    verified = compare_results(proposal, comparison['baseline'], comparison['candidate'],vary_cavity=comparison.get('vary_cavity',False))
     lines = ['I simulated the current and proposed settings with the same storage, noise and tolerances.', '',
              '| Parameter | Current | Tested |', '|---|---:|---:|']
     for key, value in proposal['changes'].items():

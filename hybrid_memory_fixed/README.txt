@@ -288,6 +288,33 @@ with the OpenAI VS Code/VS Code Insiders extension. PATH installations take
 precedence; the newest executable extension version is selected as a fallback.
 An existing signed-in extension installation does not need a separate CLI install.
 
+Clear chat and cavity-frequency permission:
+Clear chat removes the assistant conversation, draft question, pending proposal,
+preview and old run context. It cancels any pending assistant answer or search
+and ignores late replies. Current panel settings, main simulations, plot windows
+and saved files remain unchanged. New questions use current panel values; a new
+simulation automatically attaches fresh numerical reports again.
+Vary cavity frequency is enabled by default in the Assistant tab. Target searches
+can then vary FC within a declared positive interval compatible with the transmon
+and atom model, while retaining constant field/flux locks. Uncheck it to hold the
+current entered FC fixed for the search. Old FC values in chat do not lock it.
+A fixed field that predicts a nonpositive atomic transition remains outside the
+assumed level ordering; allowing FC to vary does not remove that model issue.
+
+Fixed field/flux constraints:
+Enabling Hold electric field constant locks V_SWAP, electrode gap, stray field,
+E_PARK and the constant-field switch for assistant proposals and searches.
+Likewise, constant flux locks the entered flux and parked-flux settings.
+You can still edit these fields manually. The assistant cannot silently retune
+them across trials. Search results list the preserved controls and actual
+atomic/cavity detuning. A request to keep the field constant requires the
+constant-field option to be enabled first.
+When the quadratic Stark model predicts a nonpositive atomic transition at the
+locked field, target searches report the model-validity problem and preserve
+all constraints instead of searching for an artifact or claiming success.
+Tiny imaginary roundoff in fidelity expectations is accepted, while significant
+imaginary components, nonfinite values and out-of-range probabilities are rejected.
+
 Target fidelity search:
 Set Target (%) in the Assistant header and click Search controls. Questions with
 an explicit goal, such as "I want fidelity of at least 80%" or "fidelity is still
@@ -299,12 +326,12 @@ AC_PULSE_SCALE. Bounds cover reachable resonance-crossing peaks within 200 MHz
 and pulse multipliers 0.4 to 25. Physics-based transferred-calibration seeds,
 staged Powell searches and a bounded differential-evolution fallback are used,
 with at most 320 screening evaluations. Simultaneous searches vary shared hold,
-optical rate, gap, applicable ramp, and constant entered peak controls.
+optical rate, gap and applicable ramp. Constant entered peak controls are locked.
 Noiseless endpoint populations screen candidates efficiently. The application
 then validates up to three candidates using the full ordinary noisy calculations,
 including the requested storage, phase calibration, logical 0/1/+ inputs and
-configured tolerance grid. Cavity frequency, device inputs, noise, storage,
-logical input and basis/solver settings remain fixed. Only a fully validated
+configured tolerance grid. Device inputs, noise, storage, logical input and basis/solver settings remain
+fixed. Cavity frequency may vary when its Assistant checkbox is enabled. Only a fully validated
 minimum fidelity meeting the requested target produces an Apply proposal.
 A budget limit or a failed candidate is never reported as achieving the target.
 This is a bounded search, not a global optimum or proof for all qubit inputs or

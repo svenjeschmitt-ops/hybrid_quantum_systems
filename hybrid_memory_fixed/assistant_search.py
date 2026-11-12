@@ -13,6 +13,7 @@ import time
 
 from hybrid_settings import (DEFAULTS, calculated_swap_field, calculated_transmon_frequency,
                              derived, resonant_flux, resonant_field, validate)
+from simulation_output import real_probability
 from assistant_calculations import (MODES, CONTROL_FIELDS, ComparisonCancelled, _score,
                                     evaluate_backend)
 
@@ -41,12 +42,76 @@ def requested_target(question):
     return value
 
 
-def search_space(config, mode):
+def constant_field_requested(question):
+    return bool(re.search(
+        r'field\b.{0,80}(?:stay|remain|kept|keep|must|need).{0,40}(?:constant|fixed|unchanged|exact)|'
+        r'(?:keep|hold|fix).{0,40}field\b.{0,40}(?:constant|fixed|unchanged|exact)|'
+        r'(?:keep|hold).{0,30}(?:constant|fixed).{0,20}field', question, re.I))
+
+
+def locked_controls(config):
+    """Constant entered controls are fixed across search trials, not just in time."""
+    keys=[]
+    if config['CONSTANT_FIELD']:
+        keys+=['CONSTANT_FIELD','V_SWAP','GAP_CM','STRAY_FIELD','E_PARK']
+    if config['CONSTANT_FLUX']:
+        keys+=['CONSTANT_FLUX','PHI_SWAP','PHI_PARK']
+    return {key:config[key] for key in keys}
+
+
+def field_diagnostics(config):
+    if not config['CONSTANT_FIELD']:
+        return None
+    electric=calculated_swap_field(config)
+    frequency=config['F_A_ZERO']+(config['K_R1']-config['K_R0'])*electric**2
+    return dict(field_V_per_cm=electric,voltage_V=config['V_SWAP'],
+                atomic_transition_MHz=frequency,cavity_MHz=config['FC'],
+                atomic_detuning_MHz=frequency-config['FC'])
+
+
+def search_space(config, mode, vary_cavity=False):
     """Peak detunings and log durations avoid ill-scaled flux/voltage coordinates."""
     import numpy as np
     c = validate(config)
     if mode not in MODES:
         raise ValueError('Unsupported search output mode.')
+    if vary_cavity:
+        keys,bounds,current,seeds,_=search_space(c,mode,False)
+        fmin=calculated_transmon_frequency(c,.5)+201
+        fmax=calculated_transmon_frequency(c,0)-201
+        atomic=(c['F_A_ZERO']+(c['K_R1']-c['K_R0'])*calculated_swap_field(c)**2
+                if c['CONSTANT_FIELD'] else c['FC'])
+        centers=[c['FC']]
+        if atomic>0:
+            centers.insert(0,atomic)
+        if c['CONSTANT_FLUX']:
+            centers.append(calculated_transmon_frequency(c,c['PHI_SWAP']))
+        lower=max(1.,fmin,.65*min(centers))
+        upper=min(fmax,1.35*max(centers))
+        if not c['CONSTANT_FIELD']:
+            stark=c['K_R1']-c['K_R0']
+            if stark<0:
+                upper=min(upper,c['F_A_ZERO']-1e-3)
+            elif stark>0:
+                lower=max(lower,c['F_A_ZERO']+1e-3)
+        if lower>=upper:
+            raise ValueError('No positive cavity-frequency search interval is reachable with this transmon and atomic model.')
+        def decode(x):
+            shifted=dict(c,FC=float(x[0]))
+            inner_keys,_,_,_,inner_decode=search_space(shifted,mode,False)
+            if inner_keys!=keys:
+                raise ValueError('Active search controls changed unexpectedly.')
+            return inner_decode(x[1:])
+        frequency_seeds=[]
+        for center in centers:
+            value=float(np.clip(center,lower,upper))
+            try:
+                _,_,_,local_seeds,_=search_space(dict(c,FC=value),mode,False)
+                frequency_seeds.append(np.r_[value,local_seeds[0]])
+            except ValueError:
+                pass
+        frequency_seeds += [np.r_[float(np.clip(c['FC'],lower,upper)),seed] for seed in seeds]
+        return ['FC',*keys],[(lower,upper),*bounds],np.r_[float(np.clip(c['FC'],lower,upper)),current],frequency_seeds,decode
     if mode.startswith('Simultaneous cavity resonance:'):
         keys = ['SIM_HOLD_SCALE', 'OMEGA', 'GAP']
         bounds = [(math.log(.4), math.log(2.5)),
@@ -55,21 +120,6 @@ def search_space(config, mode):
             keys.append('SIM_RAMP')
             bounds.append((math.log(c['SIM_RAMP']*.2), math.log(c['SIM_RAMP']*5)))
         seed=dict(c)
-        if c['CONSTANT_FLUX']:
-            try:
-                seed['PHI_SWAP']=resonant_flux(c)
-            except ValueError:
-                pass
-            keys.append('PHI_SWAP')
-            bounds.append((max(0,seed['PHI_SWAP']-.025),min(.5,seed['PHI_SWAP']+.025)))
-        if c['CONSTANT_FIELD']:
-            try:
-                seed['V_SWAP']=c['GAP_CM']*(resonant_field(c)-c['STRAY_FIELD'])
-            except ValueError:
-                pass
-            keys.append('V_SWAP')
-            width=max(.02,abs(seed['V_SWAP'])*.25)
-            bounds.append((seed['V_SWAP']-width,seed['V_SWAP']+width))
         linear={'GAP','PHI_SWAP','V_SWAP'}
         def encode(values):
             x=np.array([values[key] if key in linear else math.log(values[key]) for key in keys])
@@ -78,7 +128,7 @@ def search_space(config, mode):
             return validate({**c, **{key:float(value) if key in linear else math.exp(value) for key,value in zip(keys,x)}})
         return keys, bounds, encode(c), [encode(seed),encode(c)], decode
     stark = c['K_R1']-c['K_R0']
-    if stark == 0:
+    if stark == 0 and not c['CONSTANT_FIELD']:
         raise ValueError('A tunable differential atomic Stark shift is required for this sequential search.')
     park_t = calculated_transmon_frequency(c,c['PHI_PARK'])-c['FC']
     park_a = c['F_A_ZERO']+stark*c['E_PARK']**2-c['FC']
@@ -92,7 +142,7 @@ def search_space(config, mode):
         abound = (abound[0],min(abound[1],c['F_A_ZERO']-c['FC']-1e-6))
     else:
         abound = (max(abound[0],c['F_A_ZERO']-c['FC']+1e-6),abound[1])
-    if tbound[0]>=tbound[1] or abound[0]>=abound[1]:
+    if (not c['CONSTANT_FLUX'] and tbound[0]>=tbound[1]) or (not c['CONSTANT_FIELD'] and abound[0]>=abound[1]):
         raise ValueError('No reachable resonance-crossing interval exists within the search bounds.')
     keys = ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE']
     bounds = [tbound,(math.log(.4),math.log(25)),abound,(math.log(.4),math.log(25))]
@@ -102,10 +152,10 @@ def search_space(config, mode):
                          values['F_A_ZERO']+stark*calculated_swap_field(values)**2-values['FC'],
                          math.log(values['AC_PULSE_SCALE'])])
     def decode(x):
-        phi = resonant_flux(dict(c,FC=c['FC']+float(x[0])))
-        field = math.sqrt((c['FC']+float(x[2])-c['F_A_ZERO'])/stark)
+        phi = c['PHI_SWAP'] if c['CONSTANT_FLUX'] else resonant_flux(dict(c,FC=c['FC']+float(x[0])))
+        field = calculated_swap_field(c) if c['CONSTANT_FIELD'] else math.sqrt((c['FC']+float(x[2])-c['F_A_ZERO'])/stark)
         return validate(dict(c,PHI_SWAP=phi,TC_PULSE_SCALE=math.exp(x[1]),
-                             V_SWAP=c['GAP_CM']*(field-c['STRAY_FIELD']),AC_PULSE_SCALE=math.exp(x[3])))
+                             V_SWAP=c['V_SWAP'] if c['CONSTANT_FIELD'] else c['GAP_CM']*(field-c['STRAY_FIELD']),AC_PULSE_SCALE=math.exp(x[3])))
     def clip(x):
         return np.clip(x,[a for a,b in bounds],[b for a,b in bounds])
     old = derived(DEFAULTS)
@@ -115,6 +165,24 @@ def search_space(config, mode):
         math.log(DEFAULTS['AC_PULSE_SCALE']*math.sqrt(max(.1,abs(park_a)/150)))])
     seeds = [clip(seed),clip(encode(c)),clip([old['transmon_swap_detuning_MHz'],math.log(c['TC_PULSE_SCALE']),
                                            old['atom_swap_detuning_MHz'],math.log(c['AC_PULSE_SCALE'])])]
+    if c['CONSTANT_FIELD'] or c['CONSTANT_FLUX']:
+        original_decode=decode
+        positions=[i for i,key in enumerate(keys) if key not in locked_controls(c)]
+        held=encode(c)
+        active_keys=[keys[i] for i in positions]
+        active_bounds=[bounds[i] for i in positions]
+        # With a fixed field/flux, optimize optical timing too; never alter the field itself.
+        active_keys+=['OMEGA','GAP']
+        active_bounds+=[(math.log(c['OMEGA']*.5),math.log(c['OMEGA']*2)),(0,max(.03,c['GAP']*2))]
+        def compact(x):
+            return np.r_[np.asarray(x)[positions],math.log(c['OMEGA']),c['GAP']]
+        active_seeds=[compact(x) for x in seeds]
+        def decode_active(x):
+            full=held.copy();full[positions]=x[:len(positions)]
+            candidate=original_decode(full)
+            candidate.update(OMEGA=math.exp(x[-2]),GAP=float(x[-1]))
+            return validate(candidate)
+        return active_keys,active_bounds,compact(held),active_seeds,decode_active
     return keys,bounds,clip(encode(c)),seeds,decode
 
 
@@ -149,7 +217,7 @@ def screen(b, mode, stage='joint'):
             initial=qt.tensor(b.e,qt.basis(b.NC,0),b.h0) if direction=='write' else b.retrieval_initial(0,1)
             target=qt.tensor(b.g,qt.basis(b.NC,0),b.h1) if direction=='write' else qt.tensor(b.e,qt.basis(b.NC,0),b.h0)
             final=qt.sesolve(h,initial,times,options=options).states[-1]
-            scores.append(float(qt.expect(target.proj(),final)))
+            scores.append(real_probability(qt.expect(target.proj(),final)))
         return min(scores)
     scores=[]
     if stage in ('tc','ac') or 'write' in MODES[mode]:
@@ -158,19 +226,19 @@ def screen(b, mode, stage='joint'):
         initial=qt.tensor(b.e,qt.basis(b.NC,0),b.h0)
         final=qt.sesolve(b.H,initial,times,options=options).states[-1]
         target=qt.tensor(b.g,qt.basis(b.NC,1),b.r0) if stage=='tc' else qt.tensor(b.g,qt.basis(b.NC,0),b.h1)
-        scores.append(float(qt.expect(target.proj(),final)))
+        scores.append(real_probability(qt.expect(target.proj(),final)))
     if stage=='joint' and 'read' in MODES[mode]:
         h,_,stages,*_=b.retrieval_model()
         times=np.unique([0.,*[x for _,pair in stages for x in pair]])
         final=qt.sesolve(h,b.retrieval_initial(0,1),times,options=options).states[-1]
-        scores.append(float(qt.expect(qt.tensor(b.e,qt.basis(b.NC,0),b.h0).proj(),final)))
+        scores.append(real_probability(qt.expect(qt.tensor(b.e,qt.basis(b.NC,0),b.h0).proj(),final)))
     return min(scores)
 
 
-def optimize_controls(config, mode, target, directory, max_evaluations=320, evaluator=None):
+def optimize_controls(config, mode, target, directory, max_evaluations=320, evaluator=None, vary_cavity=False):
     import numpy as np
     from scipy.optimize import minimize, differential_evolution
-    keys,bounds,current,seeds,decode=search_space(config,mode)
+    keys,bounds,current,seeds,decode=search_space(config,mode,vary_cavity)
     cache,trace,candidates={},[],[]
     best_score,best_x=-1.,current.copy()
     def update(stage):
@@ -224,7 +292,7 @@ def optimize_controls(config, mode, target, directory, max_evaluations=320, eval
     try:
         for seed in seeds:
             evaluate(seed,'joint')
-        if not mode.startswith('Simultaneous cavity resonance:') and best_score<goal:
+        if not mode.startswith('Simultaneous cavity resonance:') and keys==['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE'] and best_score<goal:
             seed=seeds[0]
             tc=local(seed,[0,1],'tc',.985,80)
             ac=local(tc,[2,3],'ac',max(.95,goal),90)
@@ -259,7 +327,7 @@ def optimize_controls(config, mode, target, directory, max_evaluations=320, eval
     return result
 
 
-def validate_search_result(result, config, mode, target):
+def validate_search_result(result, config, mode, target, vary_cavity=None):
     c=validate(config)
     if result['mode']!=mode or result['target']!=target or result['baseline']['settings']!=c:
         raise ValueError('Search evidence does not match the captured request.')
@@ -267,13 +335,24 @@ def validate_search_result(result, config, mode, target):
     if validate(best['settings'])!=best['settings']:
         raise ValueError('Search candidate settings are not canonical.')
     altered={k for k in c if best['settings'][k]!=c[k]}
-    allowed=set(search_space(c,mode)[0])
+    frequency_free=bool(result.get('vary_cavity',False))
+    if vary_cavity is not None and frequency_free!=bool(vary_cavity):
+        raise ValueError('Cavity-frequency search permissions do not match the request.')
+    space=search_space(c,mode,frequency_free)
+    allowed=set(space[0])
+    if frequency_free and not space[1][0][0]<=best['settings']['FC']<=space[1][0][1]:
+        raise ValueError('Found cavity frequency is outside the declared search interval.')
+    locks=locked_controls(c)
+    if any(best['settings'][key]!=value for key,value in locks.items()):
+        raise ValueError('Search changed a locked constant field or flux control.')
     if altered-allowed:
         raise ValueError('Search changed fixed scientific assumptions.')
     before,after=_score(result['baseline'],mode),_score(best,mode)
     if best['mode']!=mode:
         raise ValueError('Search candidate mode mismatch.')
-    result=dict(result,baseline_score=before,best_score=after,target_reached=after>=target,
+    diagnostic=field_diagnostics(c)
+    model_valid=diagnostic is None or diagnostic['atomic_transition_MHz']>0
+    result=dict(result,vary_cavity=frequency_free,cavity_search_bounds_MHz=list(space[1][0]) if frequency_free else None,locked_controls=locks,field_diagnostics=field_diagnostics(best['settings']),model_valid=model_valid,baseline_score=before,best_score=after,target_reached=model_valid and after>=target,
                 changes={k:best['settings'][k] for k in sorted(altered)})
     return result
 
@@ -282,15 +361,24 @@ def search_answer(result, config, mode, target):
     result=validate_search_result(result,config,mode,target)
     lines=[f"Target: **{target:.2%}** minimum joint fidelity for logical 0, 1 and + across the selected directions.",
            f"Validated score: **{result['baseline_score']:.4%} → {result['best_score']:.4%}**.",
-           'Storage, noise, cavity frequency, basis and tolerance bounds were held fixed.','',
+           ('Storage, noise, basis and tolerance bounds were held fixed; cavity frequency was allowed to vary.' if result['vary_cavity'] else 'Storage, noise, cavity frequency, basis and tolerance bounds were held fixed.'),'',
            '| Parameter | Current | Found |','|---|---:|---:|']
     for key in result.get('searched_parameters',[]):
         lines.append(f"| {key} | {config[key]} | {result['best']['settings'][key]} |")
+    if result['locked_controls']:
+        lines+=['','Locked controls preserved: '+', '.join(f'{key}={value}' for key,value in result['locked_controls'].items())+'.']
+    diagnostic=result['field_diagnostics']
+    if diagnostic:
+        lines+=['',f"Fixed nominal field: {diagnostic['field_V_per_cm']:.6g} V/cm. The implemented Stark model gives atomic transition {diagnostic['atomic_transition_MHz']:.6g} MHz, versus cavity {diagnostic['cavity_MHz']:.6g} MHz (detuning {diagnostic['atomic_detuning_MHz']:+.6g} MHz)."]
+        if diagnostic['atomic_transition_MHz']<=0:
+            lines+=['At this field the quadratic selected-level model predicts inverted atomic level ordering. Recheck the physical level scheme and Stark-model validity; the search does not change these device assumptions.']
     lines+=['','| Direction | Logical 0 | Logical 1 | Logical + |','|---|---:|---:|---:|']
     for direction,data in result['best']['directions'].items():
         lines.append(f"| {direction} | "+' | '.join(f'{v:.4%}' for v in data['sampled_logical_lows'])+' |')
     if result['target_reached']:
         lines+=['','**Target reached in the full noisy simulation**, including storage and configured tolerance samples.']
+    elif not result['model_valid']:
+        lines+=['','**Target not certified at this fixed field.** The model predicts a nonpositive atomic transition, so optimization was skipped. No field settings were changed and no proposal is offered.']
     else:
         lines+=['','**Target not reached within this search budget.** The best tested result remains below the request; no target-reaching proposal is offered.']
     lines+=['','Screening used noiseless endpoint populations; the reported fidelities are from full noisy validation. '
@@ -302,7 +390,7 @@ def search_answer(result, config, mode, target):
     return '\n'.join(lines)
 
 
-def worker(config, mode, target, directory, max_evaluations=320):
+def worker(config, mode, target, directory, max_evaluations=320, vary_cavity=False):
     directory=Path(directory)
     def validate_point(c,label):
         folder=directory/label;folder.mkdir(exist_ok=True)
@@ -312,26 +400,28 @@ def worker(config, mode, target, directory, max_evaluations=320):
         return evaluate_backend(b,mode,folder)
     baseline=validate_point(config,'baseline')
     best=baseline
-    screening=dict(parameters=search_space(config,mode)[0],evaluations=0,candidates=[])
-    if _score(baseline,mode)<target:
-        screening=optimize_controls(config,mode,target,directory,max_evaluations)
+    screening=dict(parameters=search_space(config,mode,vary_cavity)[0],evaluations=0,candidates=[])
+    diagnostic=field_diagnostics(config)
+    model_valid=diagnostic is None or diagnostic['atomic_transition_MHz']>0
+    if model_valid and _score(baseline,mode)<target:
+        screening=optimize_controls(config,mode,target,directory,max_evaluations,vary_cavity=vary_cavity)
         for index,candidate in enumerate(screening['candidates']):
             point=validate_point(candidate['settings'],f'candidate_{index}')
             if _score(point,mode)>_score(best,mode):
                 best=point
             if _score(best,mode)>=target:
                 break
-    result=dict(mode=mode,target=target,baseline=baseline,best=best,
+    result=dict(mode=mode,target=target,vary_cavity=vary_cavity,baseline=baseline,best=best,
                 searched_parameters=screening['parameters'],screening_evaluations=screening['evaluations'])
     return validate_search_result(result,config,mode,target)
 
 
-def run_target_search(config, mode, target, cancelled, project_root, on_progress=None, timeout=2400):
+def run_target_search(config, mode, target, cancelled, project_root, on_progress=None, timeout=2400, vary_cavity=False):
     from codex_assistant import _stop
     config=validate(config)
     if not 0<target<=1:
         raise ValueError('Target fidelity must be greater than 0 and at most 100%.')
-    search_space(config,mode)
+    search_space(config,mode,vary_cavity)
     if cancelled.is_set():
         raise ComparisonCancelled()
     root=Path(project_root)/'output'/'assistant_searches';root.mkdir(parents=True,exist_ok=True)
@@ -340,6 +430,8 @@ def run_target_search(config, mode, target, cancelled, project_root, on_progress
     output=folder/'result.json'
     command=[sys.executable,'-B','-u',str(Path(__file__).resolve()),'--config',str(conf),
              '--output',str(output),'--mode',mode,'--target',str(target)]
+    if vary_cavity:
+        command.append('--vary-cavity')
     env={**os.environ,'MPLBACKEND':'Agg','HYBRID_SIM_PROGRESS':'0'};env.pop('HYBRID_STOP_FILE',None)
     with (folder/'search.log').open('w') as log:
         process=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=env,start_new_session=os.name=='posix')
@@ -364,8 +456,11 @@ def run_target_search(config, mode, target, cancelled, project_root, on_progress
                 except subprocess.TimeoutExpired:
                     pass
             if code:
-                raise RuntimeError('Target search failed. See '+str(folder/'search.log'))
-            result=validate_search_result(json.loads(output.read_text()),config,mode,target)
+                log.flush()
+                lines=[line for line in (folder/'search.log').read_text(errors='replace').splitlines() if line.strip()]
+                reason=lines[-1][-400:] if lines else 'Worker exited without a diagnostic.'
+                raise RuntimeError('Target search failed: '+reason+' See '+str(folder/'search.log'))
+            result=validate_search_result(json.loads(output.read_text()),config,mode,target,vary_cavity)
             result['source']=str(output.resolve())
             if result['target_reached']:
                 settings_file=folder/'optimized_settings.json'
@@ -381,7 +476,8 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--config',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--mode',choices=tuple(MODES),required=True);parser.add_argument('--target',type=float,required=True)
+    parser.add_argument('--vary-cavity',action='store_true')
     args=parser.parse_args()
     config=validate(json.loads(Path(args.config).read_text()))
-    result=worker(config,args.mode,args.target,Path(args.output).parent)
+    result=worker(config,args.mode,args.target,Path(args.output).parent,vary_cavity=args.vary_cavity)
     Path(args.output).write_text(json.dumps(result,allow_nan=False))

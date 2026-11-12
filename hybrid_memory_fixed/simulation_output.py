@@ -5,6 +5,18 @@ from pathlib import Path
 import numpy as np
 
 
+def real_probability(value, tolerance=1e-7):
+    """Accept roundoff imaginary parts, reject nonphysical expectation values."""
+    scalar=complex(value)
+    if not (np.isfinite(scalar.real) and np.isfinite(scalar.imag)):
+        raise ValueError('Probability expectation is nonfinite.')
+    if abs(scalar.imag)>tolerance:
+        raise ValueError('Probability expectation has a significant imaginary component; check solver convergence.')
+    if not -tolerance<=scalar.real<=1+tolerance:
+        raise ValueError('Probability expectation is outside the physical range; check solver convergence.')
+    return float(scalar.real)
+
+
 def trace(time_us, **series):
     times = np.asarray(time_us, dtype=float)
     if times.ndim != 1 or not len(times) or not np.isfinite(times).all():

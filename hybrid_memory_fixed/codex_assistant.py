@@ -26,6 +26,9 @@ results or claim to have changed settings. Label proposed causes as hypotheses a
 controlled comparisons. Distinguish current panel settings from the settings of the last run.
 Missing output means the result is unknown; detuning alone does not determine fidelity.
 Time is us, ordinary frequency MHz, Hamiltonian angular frequency rad/us.
+FC is the current cavity frequency, not a permanent constraint from earlier chat.
+Use search_permissions.vary_cavity_frequency for the current search permission.
+When enabled, cavity frequency may vary while constant field/flux controls remain locked.
 FC is the cavity frequency. OMEGA is the optical Rabi frequency divided by 2*pi,
 not the cavity frequency. PHI_SWAP/PHI_PARK are peak/park flux in Phi/Phi0;
 V_SWAP is peak electrode voltage. TC_PULSE_SCALE/AC_PULSE_SCALE stretch the pulses.
@@ -43,7 +46,7 @@ scale*(2*RAMP+pi/(2*g)), not a guaranteed swap. Simultaneous exchange instead ha
 a shared flat hold with smooth ramps, or constant entered controls. Its reference
 hold is pi/sqrt(g_TC^2+g_AC^2). Sequential pulse scales and RAMP are unused there.
 In simultaneous mode PHI_SWAP/V_SWAP are unused unless the corresponding constant
-control is enabled. Do not advise changing inactive_parameters.
+control is enabled. Do not advise changing inactive_parameters or locked_parameters. Constant entered field/flux controls are fixed across assistant trials as well as during each run.
 The calculated resonance_reference values are exact model references, NOT optimized
 pulse peaks and NOT evidence of improved transfer. Simultaneous auto-tuning already
 uses them for pulsed controls. A rounded pulse peaking at bare resonance can perform
@@ -146,7 +149,8 @@ def tuning_context(config, mode):
             quantities, error = {}, str(exc)
     else:
         inactive += ['SIM_HOLD_SCALE', 'SIM_RAMP']
-    return dict(protocol='simultaneous' if simultaneous else 'sequential', derived=quantities,
+    from assistant_search import locked_controls
+    return dict(locked_parameters=locked_controls(config),protocol='simultaneous' if simultaneous else 'sequential', derived=quantities,
                 inactive_parameters=inactive, resonance_reference=reference, error=error,
                 parameter_sweep_supported=not simultaneous,
                 tuning_status='No optimization was run while preparing this advice.')
@@ -204,7 +208,7 @@ def sweep_evidence(last_run, config, mode):
         return dict(applicable=False, error=str(exc))
 
 
-def build_messages(question, config, mode, last_run=None, history=None):
+def build_messages(question, config, mode, last_run=None, history=None, vary_cavity=False):
     """Snapshot settings, protocol, tested evidence and recent follow-up context."""
     config = validate(config)
     tuning = tuning_context(config, mode)
@@ -212,6 +216,7 @@ def build_messages(question, config, mode, last_run=None, history=None):
         "current_panel": {"settings": config, "mode": mode, **tuning},
         "parameter_units": {key: units for _, key, _, units, _, _ in FIELDS},
         "last_simulation": last_run,
+        "search_permissions": {"vary_cavity_frequency": bool(vary_cavity)},
         "recent_conversation": list(history or [])[-6:],
         "verified_sweep_evidence": sweep_evidence(last_run, config, mode),
     }

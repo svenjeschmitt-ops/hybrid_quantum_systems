@@ -28,6 +28,11 @@ def validate_changes(changes, baseline, mode):
         raise ValueError('Unsupported parameter value type.')
     baseline = validate(baseline)
     candidate = validate({**baseline, **changes})
+    from assistant_search import locked_controls
+    locked=locked_controls(baseline)
+    modified=[key for key,value in locked.items() if candidate[key]!=value]
+    if modified:
+        raise ValueError('Constant field/flux controls are locked for assistant changes: '+', '.join(modified))
     changes = {key: candidate[key] for key in changes if candidate[key] != baseline[key]}
     if not changes:
         raise ValueError('The proposed values already match the panel.')
