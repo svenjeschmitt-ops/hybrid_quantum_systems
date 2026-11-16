@@ -50,7 +50,8 @@ Example (all extra atomic values are illustrative):
 python hybrid_memory_fixed/backend.py --run --config hybrid_memory_fixed/multilevel_example.json --no-show
 Or load multilevel_example.json from the panel. The example uses four transmon
 levels and nine atomic states. Existing settings missing NT/manifold use the
-new defaults; reset defaults after restarting the panel to see the new fields.
+new defaults. Additional Rydberg levels are configured in settings files, not
+through a panel text field. Loading and saving settings preserves the manifold.
 To recover the original basis, load {"NT": 2, "RYDBERG_MANIFOLD": []}.
 
 For basis convergence, compare NT=2,3,4,... at fixed control settings, then
@@ -629,3 +630,11 @@ If stopped before any samples are available, the console reports that fact.
 Run becomes available again as soon as calculation stops or finishes. Starting
 a new simulation automatically closes the previous run's plot windows. Closing
 the panel also closes its active simulation and result windows.
+
+Configurable master equation: see DISSIPATION.md and dissipation_example.json.
+DISSIPATION={} preserves existing channels; additional measured noise is opt-in.
+
+Physical Hamiltonian: see PHYSICAL_HAMILTONIAN.md and physical_hamiltonian_example.json.
+ATOMIC_SPECTRUM supplies field-dependent energies/dipoles; OPTICAL_SCHEME supplies
+effective or explicit two-photon dynamics, light shifts and derived scattering.
+Both are opt-in; the example is synthetic and requires state-specific calibration.

@@ -27,6 +27,9 @@ from parked_solver import ParkedSolver
 from population_labels import resolved_population_labels, population_legend
 import simulation_progress as progress
 import simulation_stop as stopping
+from dissipation import collapse_operators, snapshot
+from atomic_model import AtomicModel
+from optical_model import build_optics
 
 _ASSISTANT_OUTPUT = None
 
@@ -55,6 +58,8 @@ from hybrid_settings import validate, coupling_strengths, derived, calculated_tr
 _SETTINGS = validate(_SETTINGS)
 _CONTROL_SETTINGS = effective_controls(_SETTINGS)
 _COUPLINGS = coupling_strengths(_SETTINGS)
+_ATOMIC_MODEL = AtomicModel(_SETTINGS)
+_OPTICAL_SPEC = json.loads(_SETTINGS["OPTICAL_SCHEME"])
 
 def parameter(name, default):
     return _CONTROL_SETTINGS.get(name, default)
@@ -161,13 +166,16 @@ def electric_field(t):
 NC = parameter("NC", 3)
 NT = _SETTINGS["NT"]
 EXTRA_LEVELS = parse_manifold(_SETTINGS["RYDBERG_MANIFOLD"])
-NA = 6 + len(EXTRA_LEVELS)
+NA = 6 + len(EXTRA_LEVELS) + (2 if _OPTICAL_SPEC.get("mode") == "explicit" else 0)
 g, e = qt.basis(NT, 0), qt.basis(NT, 1)
 h0, h1, r0, r1, lost, wrong = [qt.basis(NA, j) for j in range(6)]
 ATOM_STATES = dict(zip(("h0", "h1", "r0", "r1", "lost", "wrong"),
                        (h0, h1, r0, r1, lost, wrong)))
 ATOM_STATES.update({level["label"]: qt.basis(NA, 6+i)
                     for i, level in enumerate(EXTRA_LEVELS)})
+if _OPTICAL_SPEC.get("mode") == "explicit":
+    ATOM_STATES.update({f"optical_p{arm}": qt.basis(NA, 6+len(EXTRA_LEVELS)+arm)
+                        for arm in (0, 1)})
 IT, IC, IA = qt.qeye(NT), qt.qeye(NC), qt.qeye(NA)
 
 def A(target, source):
@@ -196,15 +204,23 @@ for level in EXTRA_LEVELS:
 Zh = Ph1 - Ph0
 
 
+def atomic_energy_MHz(name, field, offsets=True):
+    """Atomic energy in the fixed cavity frame, with optional static error."""
+    branch = _ATOMIC_MODEL.levels[name][0]
+    return (_ATOMIC_MODEL.energy(name, field)-branch*FC
+            + (branch*TOLERANCE_OFFSETS["FA"] if offsets else 0.0))
+
+
+def atom_detuning_MHz(field, offsets=True):
+    return atomic_energy_MHz("r1", field, offsets)-atomic_energy_MHz("r0", field, offsets)
+
+
 def extra_atomic_terms(field):
-    """Diagonal neighboring energies in the same frame as their optical arm."""
     terms = []
     for level in EXTRA_LEVELS:
         state = ATOM_STATES[level["label"]]
-        def energy(t, spec=level):
-            branch_energy = (F_A_ZERO + TOLERANCE_OFFSETS["FA"] - FC) if spec["branch"] else 0.0
-            return TWOPI * (branch_energy + spec["offset_MHz"]
-                            + spec["stark_MHz_per_Vcm2"] * field(t)**2)
+        def energy(t, name=level["label"]):
+            return TWOPI*atomic_energy_MHz(name, field(t))
         terms.append([A(state, state), energy])
     return terms
 
@@ -216,6 +232,9 @@ def multilevel_metrics(states):
     ops = {"transmon_leakage": Ptransmon_leakage,
            "atom_unwanted_population": Pwrong,
            "atom_neighbor_wrong": Pwrong_base,
+           **({"optical_intermediate_population": sum((A(ATOM_STATES[f"optical_p{arm}"], ATOM_STATES[f"optical_p{arm}"]) for arm in (0, 1)), 0*Pr0),
+               **{f"optical_intermediate_{arm}": A(ATOM_STATES[f"optical_p{arm}"], ATOM_STATES[f"optical_p{arm}"]) for arm in (0, 1)}}
+              if _OPTICAL_SPEC.get("mode") == "explicit" else {}),
            **{f"transmon_level_{j}": qt.tensor(qt.basis(NT, j).proj(), IC, IA)
               for j in range(NT)},
            **{f"atom_neighbor_{x['label']}": A(ATOM_STATES[x["label"]], ATOM_STATES[x["label"]])
@@ -244,13 +263,13 @@ def delta_t(t):
     return TWOPI * (transmon_frequency(flux(t)) + TOLERANCE_OFFSETS["FT"] - FC)
 
 def delta_r0(t):
-    return TWOPI * K_R0 * electric_field(t)**2
+    return TWOPI * atomic_energy_MHz("r0", electric_field(t))
 
 def delta_r1(t):
-    return TWOPI * (F_A_ZERO + TOLERANCE_OFFSETS["FA"] - FC + K_R1 * electric_field(t)**2)
+    return TWOPI * atomic_energy_MHz("r1", electric_field(t))
 
 def delta_wrong(t):
-    return TWOPI * (F_WRONG_SPLIT + K_WRONG * electric_field(t)**2)
+    return TWOPI * atomic_energy_MHz("wrong", electric_field(t))
 
 def prep_coeff(t):
     return 0.5 * optical_envelope(t, *PREP) * np.exp(-1j * D_R0_PARK * (t-PREP[0]))
@@ -260,8 +279,8 @@ def prep_conj(t):
 
 # Mapping occurs at the compensated park field. The optical carrier
 # phases below keep each effective optical arm resonant in this frame.
-D_R0_PARK = TWOPI * K_R0 * E_PARK**2
-D_R1_PARK = TWOPI * (F_A_ZERO - FC + K_R1 * E_PARK**2)
+D_R0_PARK = TWOPI * atomic_energy_MHz("r0", E_PARK, offsets=False)
+D_R1_PARK = TWOPI * atomic_energy_MHz("r1", E_PARK, offsets=False)
 
 def map0_coeff(t):
     return 0.5 * optical_envelope(t, *MAP) * np.exp(
@@ -301,34 +320,67 @@ for level in EXTRA_LEVELS:
         Bmap0 += level["optical_relative"] * A(h0, state)
     else:
         Bmap1 += level["optical_relative"] * A(h1, state)
-H = qt.QobjEvo([ #construction of the hamiltonian 
-    H_coupling + H_anharm, # contains the transmon-cavity and atom-cavity interactions
-    [n, cavity_error], # cavity drift in the fixed nominal rotating frame
-    [Nt, delta_t], # time dependent transmon excitation energy offset
-    [Pr0, delta_r0], # time dependent Rydberg energy offset
-    [Pr1, delta_r1],# time dependent Rydberg energy offset
-    [Pwrong_base, delta_wrong], # time dependent unwanted state
-    *extra_atomic_terms(electric_field),
-    [Bprep, prep_coeff], # Preparation laser interaction
-    [Bprep.dag(), prep_conj], 
-    [Bmap0, map0_coeff], # Mapping laser interaction involving h0
-    [Bmap0.dag(), map0_conj],
-    [Bmap1, map1_coeff], # Mapping laser interaction involtving
-    [Bmap1.dag(), map1_conj],
-])
+def coupling_terms(field, transmon_coupling=G_TC):
+    """Keep all physical links on, evaluating signed dipoles at the actual field."""
+    if not _ATOMIC_MODEL.dipoles and transmon_coupling == G_TC:
+        return [H_coupling]
+    terms = [transmon_coupling*(a.dag()*sm+a*sm.dag())]
+    for link in _ATOMIC_MODEL.links:
+        target, source = link.split("<-")
+        exchange = a*A(ATOM_STATES[target], ATOM_STATES[source])
+        def coefficient(t, name=link):
+            return TWOPI*float(_ATOMIC_MODEL.coupling(name, field(t)))
+        terms.append([exchange+exchange.dag(), coefficient])
+    return terms
 
-C_OPS = [
-    np.sqrt(1 / T1_T) * sm,
-    np.sqrt(1 / T1_C) * a,
-    np.sqrt(1 / TAU_R0) * A(lost, r0),
-    np.sqrt(1 / TAU_R1) * A(lost, r1),
-    np.sqrt(1 / TAU_WRONG) * A(lost, wrong),
-    *[np.sqrt(1 / spec["lifetime_us"]) * A(lost, ATOM_STATES[spec["label"]])
-      for spec in EXTRA_LEVELS],
-    np.sqrt(1 / (2 * TPHI_T)) * Zt,
-    np.sqrt(1 / (2 * TPHI_R)) * Zr,
-    np.sqrt(1 / (2 * TPHI_H)) * Zh,
-]
+
+def atomic_field_derivative(t, field):
+    """Derivative of the modeled H/hbar, including field-dependent exchange."""
+    value = field(t)
+    operator = sum((TWOPI*float(_ATOMIC_MODEL.energy(name, value, derivative=True))*A(ATOM_STATES[name], ATOM_STATES[name])
+                    for name in _ATOMIC_MODEL.levels), 0*Pr0)
+    for link in _ATOMIC_MODEL.dipoles:
+        target, source = link.split("<-")
+        exchange = a*A(ATOM_STATES[target], ATOM_STATES[source])
+        operator += TWOPI*float(_ATOMIC_MODEL.coupling(link, value, derivative=True))*(exchange+exchange.dag())
+    return operator
+
+
+def optical_protocol(pulses, nominal_field=E_PARK):
+    return build_optics(_DISSIPATION_MODEL, pulses, nominal_field)
+
+
+# Avoid relying on sys.modules for backends loaded via importlib in callers.
+# The namespace holds references to the same controls/operators and tolerance dict.
+from types import SimpleNamespace
+_DISSIPATION_MODEL = SimpleNamespace(**globals())
+_WRITE_OPTICAL_H, _WRITE_OPTICAL_COPS = optical_protocol([(0, PREP), (0, MAP), (1, MAP)])
+H = qt.QobjEvo([
+    *coupling_terms(electric_field), H_anharm,
+    [n, cavity_error], [Nt, delta_t], [Pr0, delta_r0], [Pr1, delta_r1],
+    [Pwrong_base, delta_wrong], *extra_atomic_terms(electric_field),
+]) + _WRITE_OPTICAL_H
+
+
+
+def protocol_c_ops(flux_control, field_control, optical0, optical1, optical_collapses=()):
+    """Share constant channels; bind control-dependent channels to this protocol."""
+    channels = collapse_operators(_DISSIPATION_MODEL, flux_control, field_control,
+                                  optical0, optical1)
+    return ([op for op in C_OPS if isinstance(op, qt.Qobj)]
+            + [op for op in channels if isinstance(op, qt.QobjEvo)]
+            + [op for op in optical_collapses if isinstance(op, qt.QobjEvo)])
+
+
+C_OPS = collapse_operators(_DISSIPATION_MODEL, flux, electric_field,
+    lambda t: optical_envelope(t, *PREP) + optical_envelope(t, *MAP),
+    lambda t: optical_envelope(t, *MAP)) + _WRITE_OPTICAL_COPS
+
+
+def parked_c_ops(operators=None, time=None):
+    return snapshot(C_OPS if operators is None else operators,
+                    MAP[1] if time is None else time)
+
 
 def time_grid(include_storage=True):
     # Include every stage endpoint explicitly in the recorded output.
@@ -682,6 +734,8 @@ def isolated_preparation(duration, dipole_ratio=REL_WRONG_DIPOLE,
     Zero field, no cavity or decay, to isolate off-resonant excitation.
     Equal-area sin^2 pi pulses, identical shape to full preparation.
     """
+    if _OPTICAL_SPEC:
+        raise ValueError("The isolated three-level pulse scan assumes OPTICAL_SCHEME={}; use --write-only or --retrieve for the physical optical model.")
     b, r, w = [qt.basis(3, j) for j in range(3)]
     B = r * b.dag() + dipole_ratio * w * b.dag()
     def drive(t):
@@ -803,54 +857,20 @@ def retrieval_model(source="hyperfine"):
         return TWOPI * (transmon_frequency(flux_read(t)) + TOLERANCE_OFFSETS["FT"] - FC)
 
     def d0_read(t):
-        return TWOPI * K_R0 * field_read(t)**2
+        return TWOPI * atomic_energy_MHz("r0", field_read(t))
 
     def d1_read(t):
-        return TWOPI * (F_A_ZERO + TOLERANCE_OFFSETS["FA"] - FC + K_R1 * field_read(t)**2)
+        return TWOPI * atomic_energy_MHz("r1", field_read(t))
 
     def dw_read(t):
-        return TWOPI * (F_WRONG_SPLIT + K_WRONG * field_read(t)**2)
-
-    # Bmap operators lower Rydberg states; their Hermitian conjugates
-    # supply the memory->Rydberg direction under the same resonant drive.
-    def unmap0(t):
-        if unmap is None:
-            return 0.0
-        return 0.5 * optical_envelope(t, *unmap) * np.exp(
-            1j * D_R0_PARK * (t - unmap[0])
-        )
-
-    def unmap1(t):
-        if unmap is None:
-            return 0.0
-        return 0.5 * optical_envelope(t, *unmap) * np.exp(
-            1j * D_R1_PARK * (t - unmap[0])
-        )
-
-    def unmap0_conj(t):
-        return np.conj(unmap0(t))
-
-    def unmap1_conj(t):
-        return np.conj(unmap1(t))
-
-    # After atom->cavity->transmon, the atom should be in r0.
-    # Return it to h0 so it need not remain in a short-lived Rydberg state.
-    def cleanup_coeff(t):
-        return 0.5 * optical_envelope(t, *cleanup) * np.exp(
-            -1j * D_R0_PARK * (t-cleanup[0]))
-
-    def cleanup_conj(t):
-        return np.conj(cleanup_coeff(t))
+        return TWOPI * atomic_energy_MHz("wrong", field_read(t))
 
     h_read = qt.QobjEvo([
-        H_coupling + H_anharm,
+        *coupling_terms(field_read), H_anharm,
         [n, cavity_error],
         [Nt, dt_read], [Pr0, d0_read], [Pr1, d1_read], [Pwrong_base, dw_read],
         *extra_atomic_terms(field_read),
-        [Bmap0, unmap0], [Bmap0.dag(), unmap0_conj],
-        [Bmap1, unmap1], [Bmap1.dag(), unmap1_conj],
-        [Bprep, cleanup_coeff], [Bprep.dag(), cleanup_conj],
-    ])
+    ]) + optical_protocol([(0, cleanup)] + ([(0, unmap), (1, unmap)] if unmap else []))[0]
     stages = []
     if unmap:
         stages.append(("Memory to Rydberg", unmap))
@@ -862,6 +882,23 @@ def retrieval_model(source="hyperfine"):
     return h_read, np.unique(np.concatenate(points)), stages, flux_read, voltage_read
 
 
+def read_c_ops(source="hyperfine"):
+    _, _, stages, flux_read, voltage_read = retrieval_model(source)
+    intervals = dict(stages)
+    def optical0(t):
+        return sum(optical_envelope(t, *intervals[name]) for name in
+                   ("Memory to Rydberg", "Return atom to h0") if name in intervals)
+    def optical1(t):
+        return (optical_envelope(t, *intervals["Memory to Rydberg"])
+                if "Memory to Rydberg" in intervals else 0.0)
+    return protocol_c_ops(flux_read,
+        lambda t: voltage_read(t)/GAP_CM + STRAY_FIELD + TOLERANCE_OFFSETS["EFIELD"],
+        optical0, optical1,
+        optical_protocol([(0, interval) for name, interval in stages
+                          if name in ("Memory to Rydberg", "Return atom to h0")]
+                         + [(1, interval) for name, interval in stages if name == "Memory to Rydberg"])[1])
+
+
 def evolve_read(initial, noisy=True, source="hyperfine", step=MAX_STEP):
     h_read, ts, stages, flux_read, voltage_read = retrieval_model(source)
     options = {"store_states": True, "atol": 1e-11, "rtol": 1e-9,
@@ -870,7 +907,7 @@ def evolve_read(initial, noisy=True, source="hyperfine", step=MAX_STEP):
         result = stopping.solve(qt.sesolve, h_read, initial, ts, options=options)
     else:
         rho = qt.ket2dm(initial) if initial.isket else initial
-        result = stopping.solve(qt.mesolve, h_read, rho, ts, c_ops=C_OPS if noisy else [],
+        result = stopping.solve(qt.mesolve, h_read, rho, ts, c_ops=read_c_ops(source) if noisy else [],
                             options=options)
     return ts, result.states, stages, flux_read, voltage_read
 
@@ -884,7 +921,7 @@ def retrieval_initial(alpha, beta, source="hyperfine"):
 @lru_cache(maxsize=1)
 def parked_storage_solver():
     """Reuse the constant parked Lindblad generator for independent inputs."""
-    return ParkedSolver(H(MAP[1]), C_OPS)
+    return ParkedSolver(H(MAP[1]), parked_c_ops())
 
 
 def hold_memory(initial, noisy=True):
@@ -947,7 +984,7 @@ def retrieval_effect(target, phase, noisy=True):
     u = qt.tensor(rotation, IC, IA)
     projector = qt.ket2dm(qt.tensor(target, qt.basis(NC, 0), h0))
     effect = u.dag() * projector * u
-    adjoint = qt.liouvillian(h_read, C_OPS if noisy else []).dag()
+    adjoint = qt.liouvillian(h_read, read_c_ops("hyperfine") if noisy else []).dag()
     duration = times[-1]
 
     def reverse_generator(t):
@@ -963,14 +1000,48 @@ def retrieval_effect(target, phase, noisy=True):
 
 
 def direct_transmon_fidelity(elapsed):
-    """Six-state mean for isolated transmon T1/pure-dephasing storage.
+    """Six-state mean for the isolated transmon, removing known precession.
 
-    Deterministic parked-frequency precession is removed by its rotating frame.
+    Use the same ladder relaxation, heating and parked white flux noise as
+    the memory model. Leakage to higher transmon levels counts as error.
     """
-    elapsed = np.asarray(elapsed)
-    t2_inverse = 1 / (2 * T1_T) + 1 / TPHI_T
-    return (3 + 2 * np.exp(-elapsed * t2_inverse)
-            + np.exp(-elapsed / T1_T)) / 6
+    from dissipation import parse_dissipation
+    c = parse_dissipation(_SETTINGS['DISSIPATION'], NT, EXTRA_LEVELS)
+    elapsed = np.asarray(elapsed, dtype=float)
+    if not np.isfinite(elapsed).all() or np.any(elapsed < 0):
+        raise ValueError("Elapsed times must be finite and nonnegative.")
+    rates, occupation = c['transmon_down_rates_per_us'], c['transmon_nbar']
+    # Exact original expression when extra mechanisms are disabled.
+    if not occupation and not c['flux_white_psd']:
+        gamma = rates[0] if rates else 1/T1_T
+        return (3+2*np.exp(-elapsed*(gamma/2+1/TPHI_T))
+                +np.exp(-elapsed*gamma))/6
+    number = qt.num(NT)
+    local_z = 2*number-qt.qeye(NT)
+    ops = [np.sqrt(1/(2*TPHI_T))*local_z]
+    if rates:
+        for j, gamma in enumerate(rates, start=1):
+            jump = qt.basis(NT, j-1)*qt.basis(NT, j).dag()
+            ops.extend([np.sqrt(gamma*(1+occupation))*jump,
+                        np.sqrt(gamma*occupation)*jump.dag()])
+    else:
+        ops.extend([np.sqrt((1+occupation)/T1_T)*qt.destroy(NT),
+                    np.sqrt(occupation/T1_T)*qt.create(NT)])
+    if c['flux_white_psd']:
+        # Same flux derivative as in the coupled model, evaluated at nominal park.
+        phi = PHI_PARK
+        u = np.cos(np.pi*phi)**2+ASYMMETRY**2*np.sin(np.pi*phi)**2
+        slope = (np.sqrt(8*EC*EJ_MAX)*.25*u**(-.75)*np.pi
+                 *(ASYMMETRY**2-1)*np.sin(2*np.pi*phi))
+        ops.append(np.sqrt(c['flux_white_psd'])*TWOPI*slope*number)
+    times, inverse = np.unique(np.r_[0., elapsed.ravel()], return_inverse=True)
+    solver = ParkedSolver(0*number, ops)
+    values = []
+    for target in (g, e, (g+e).unit()):
+        states = solver.run(target, times).states
+        values.append(np.real(qt.expect(target.proj(), states)))
+    mean = (values[0]+values[1]+4*values[2])/6
+    return mean[inverse[1:]].reshape(elapsed.shape)
 
 
 def atomic_storage_effect(target, phase):
@@ -1055,7 +1126,7 @@ def storage_fidelity_data():
         # All drives vanish after MAP; the remaining Hamiltonian is constant.
         # Block propagation avoids a dense full-Liouvillian diagonalization.
         parked = H(MAP[1])
-        solver = ParkedSolver(parked, C_OPS if noisy else [])
+        solver = ParkedSolver(parked, parked_c_ops() if noisy else [])
         values, atomic_values = [], []
         for index, target in enumerate(inputs, start=1):
             print(f"  input {index}/6", flush=True)
@@ -1214,7 +1285,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
                         framealpha=1)
     fields = np.asarray([voltage_read(t) / GAP_CM + STRAY_FIELD for t in ts])
     transmon_detuning = np.asarray([transmon_frequency(flux_read(t)) - FC for t in ts])
-    atom_detuning = F_A_ZERO - FC + (K_R1 - K_R0) * fields**2
+    atom_detuning = atom_detuning_MHz(fields, offsets=False)
     detuning_axis.plot(ts, transmon_detuning, color="tab:blue", label="Transmon")
     detuning_axis.plot(ts, atom_detuning, color="tab:orange", linestyle="--", label="Atom")
     detuning_axis.axhline(0, color="gray", linewidth=.7, alpha=.5)
@@ -1357,16 +1428,20 @@ def paper_figure(save=False, show=True):
     # |e,0,r0>, |g,1,r0>, |g,0,r1>.
     # Subtract the common r0 energy; keep the off-resonant transmon
     # so its dispersive cavity shift is present.
-    span = 3.0 / abs(K_R1-K_R0)
-    fields = np.sqrt(np.linspace(max(0.0,E_SWAP**2-span),E_SWAP**2+span,401))
-    detunings = F_A_ZERO-FC+(K_R1-K_R0)*fields**2
+    if _ATOMIC_MODEL.domain is not None:
+        fields = np.linspace(*_ATOMIC_MODEL.domain, 401)
+    else:
+        span = 3.0 / abs(K_R1-K_R0)
+        fields = np.sqrt(np.linspace(max(0.0,E_SWAP**2-span),E_SWAP**2+span,401))
+    detunings = atom_detuning_MHz(fields, offsets=False)
     volts = GAP_CM * (fields - STRAY_FIELD)
     eigenvalues, atom_weights = [], []
     dt = F_T_PARK - FC
-    for da in detunings:
+    for field, da in zip(fields, detunings):
+        ga = float(_ATOMIC_MODEL.coupling("r1<-r0", field))
         matrix = qt.Qobj([[dt, G_TC/TWOPI, 0],
-                          [G_TC/TWOPI, 0, G_AC/TWOPI],
-                          [0, G_AC/TWOPI, da]])
+                          [G_TC/TWOPI, 0, ga],
+                          [0, ga, da]])
         energies, vectors = matrix.eigenstates()
         eigenvalues.append(energies[:2])
         atom_weights.append([abs(v.full()[2, 0])**2 for v in vectors[:2]])
@@ -1380,13 +1455,14 @@ def paper_figure(save=False, show=True):
     psi = qt.tensor(g, qt.basis(NC, 1), r0)
     populations = []
     for field in (E_SWAP, E_PARK):
-        H = (H_coupling + H_anharm + TWOPI * dt * Nt
-             + TWOPI * K_R0 * field**2 * Pr0
-             + TWOPI * (F_A_ZERO-FC+K_R1*field**2) * Pr1
-             + TWOPI * (F_WRONG_SPLIT+K_WRONG*field**2) * Pwrong_base
+        H = (qt.QobjEvo(coupling_terms(lambda t: field))(0) + H_anharm + TWOPI * dt * Nt
+             + TWOPI * atomic_energy_MHz("r0", field, offsets=False) * Pr0
+             + TWOPI * atomic_energy_MHz("r1", field, offsets=False) * Pr1
+             + TWOPI * atomic_energy_MHz("wrong", field, offsets=False) * Pwrong_base
              + sum((op * coeff(0) for op, coeff in extra_atomic_terms(lambda t: field)), 0*Pr0))
         result = stopping.solve(qt.mesolve,
-            H, qt.ket2dm(psi), ts, c_ops=C_OPS, e_ops=[Pr1],
+            H, qt.ket2dm(psi), ts, c_ops=protocol_c_ops(
+                lambda t: PHI_PARK, lambda t: field, lambda t: 0., lambda t: 0.), e_ops=[Pr1],
             options={"method":"dop853", "atol":1e-11, "rtol":1e-9,
                      "max_step":MAX_STEP, "nsteps":100000},
         )
@@ -1739,6 +1815,8 @@ if __name__ == "__main__":
     parser.add_argument("--assistant-output", help="Directory for run-specific numerical assistant reports.")
     parser.add_argument("--write-only", action="store_true", help="Only the transmon-to-atom transfer figure.")
     args = parser.parse_args()
+    if _OPTICAL_SPEC and (args.paper_figure or args.write_paper_figure or args.leakage_scan):
+        parser.error("Isolated three-level summary scans require OPTICAL_SCHEME={}; use --write-only, --retrieve, --roundtrip or --simultaneous for physical optics.")
     if args.stop_file:
         os.environ["HYBRID_STOP_FILE"] = args.stop_file
     progress.enable(args.progress or os.environ.get("HYBRID_SIM_PROGRESS")=="1")

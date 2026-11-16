@@ -19,7 +19,7 @@ def parse_manifold(value):
         raise ValueError("RYDBERG_MANIFOLD must be a JSON array of level objects.") from exc
     if not isinstance(levels, list):
         raise ValueError("RYDBERG_MANIFOLD must be a JSON array.")
-    labels = {"h0", "h1", "r0", "r1", "lost", "wrong"}
+    labels = {"h0", "h1", "r0", "r1", "lost", "wrong", "optical_p0", "optical_p1"}
     result = []
     required = {"label", "branch", "offset_MHz", "stark_MHz_per_Vcm2",
                 "lifetime_us", "optical_relative", "cavity_from"}

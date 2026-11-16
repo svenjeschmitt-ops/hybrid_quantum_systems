@@ -24,8 +24,7 @@ def controls(b, times, mode, source):
     dc = b.TOLERANCE_OFFSETS['FC']
     return dict(flux=phi, field=field,
                 transmon_detuning=b.transmon_frequency(phi) + b.TOLERANCE_OFFSETS['FT'] - b.FC - dc,
-                atom_detuning=b.F_A_ZERO + b.TOLERANCE_OFFSETS['FA'] - b.FC - dc
-                + (b.K_R1 - b.K_R0) * field**2)
+                atom_detuning=b.atom_detuning_MHz(field)-dc)
 
 
 def final_metrics(b, state, mode, fidelity, before_fidelity, basis):

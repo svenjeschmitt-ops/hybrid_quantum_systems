@@ -65,7 +65,22 @@ noise on/off switches are not available in the panel. Tolerance ranges are fixed
 error sensitivity tests, not control optimization. Changing INPUT_THETA/INPUT_PHI,
 turning off tolerances, shortening the requested memory hold, or making lifetimes
 arbitrarily long does not establish a better transfer protocol.
-Optical envelopes are sin-squared pi pulses. Noise uses Lindblad loss/dephasing.
+ATOMIC_SPECTRUM can override atomic energies and signed cavity dipoles with
+field tables; those tables supersede the corresponding illustrative Stark inputs.
+OPTICAL_SCHEME can derive the optical Rabi frequency, light shifts and scattering
+from a shared intermediate-state model, or explicitly include optical_p0/p1.
+OMEGA is inactive when OPTICAL_SCHEME is enabled. Do not optimize it then.
+Physical optical mode requires new pulse calibration; its reference area does not
+guarantee transfer with light shifts. Atomic tables assume adiabatic tracked states.
+Optical envelopes in the ideal mode are sin-squared pi pulses. Noise uses configurable local Lindblad channels.
+DISSIPATION is a JSON object (possibly serialized as a string). Empty {} reproduces
+legacy loss/dephasing. Optional channels include transmon/cavity thermal occupation,
+independent transmon transition rates, lifetime-preserving atomic branching, additional
+measured atomic transitions, projector dephasing, white flux/field noise and optical
+scattering proportional to each arm's pulse intensity. Extra rates are not calibrated
+atomic data. Atomic transition rates add to lifetimes; do not double-count measured
+total decay. Control white noise is Markovian, distinct from static tolerances, and
+does not implement colored or 1/f noise. All jump rates are 1/us, not angular MHz.
 Write maps (alpha|g>+beta|e>)|0,h0> to |g,0>(alpha|h0>+beta|h1>).
 Independent read starts from a prepared atomic state, holds for STORAGE, then retrieves.
 Joint fidelity is <target|rho|target>, including empty source/cavity, without postselection.
@@ -115,6 +130,17 @@ def tuning_context(config, mode):
     """Compute references with model functions rather than asking the LLM to guess."""
     simultaneous = mode.startswith("Simultaneous cavity resonance:")
     inactive = []
+    import json
+    spectrum = json.loads(config.get('ATOMIC_SPECTRUM', '{}'))
+    optics = json.loads(config.get('OPTICAL_SCHEME', '{}'))
+    if optics:
+        inactive.append('OMEGA')
+    energies = spectrum.get('energies_MHz', {})
+    for name, key in (('r0', 'K_R0'), ('r1', 'K_R1'), ('wrong', 'K_WRONG')):
+        if name in energies:
+            inactive.append(key)
+    if 'wrong' in energies:
+        inactive.append('F_WRONG_SPLIT')
     if config['DIRECT_COUPLING']:
         inactive += ['BETA', 'V_ZPF_UV', 'D_01_EA0', 'E_ZPF_V_PER_M', 'DIPOLE_ALIGNMENT']
     else:

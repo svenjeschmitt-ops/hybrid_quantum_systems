@@ -1,0 +1,32 @@
+{
+  "NT": 4,
+  "RYDBERG_MANIFOLD": [
+    {
+      "label": "wrong_upper",
+      "branch": 1,
+      "offset_MHz": 1320.0,
+      "stark_MHz_per_Vcm2": -12.0,
+      "lifetime_us": 100.0,
+      "optical_relative": 1.0,
+      "cavity_from": {"wrong": 1.0}
+    },
+    {
+      "label": "lower2",
+      "branch": 0,
+      "offset_MHz": 2200.0,
+      "stark_MHz_per_Vcm2": -2.0,
+      "lifetime_us": 100.0,
+      "optical_relative": 0.2,
+      "cavity_from": {}
+    },
+    {
+      "label": "upper2",
+      "branch": 1,
+      "offset_MHz": 2300.0,
+      "stark_MHz_per_Vcm2": -12.0,
+      "lifetime_us": 100.0,
+      "optical_relative": 0.2,
+      "cavity_from": {"lower2": 1.0, "r0": 0.1}
+    }
+  ]
+}

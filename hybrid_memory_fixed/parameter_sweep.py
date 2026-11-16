@@ -12,17 +12,20 @@ from datetime import datetime
 import uuid
 
 from hybrid_settings import FIELDS, validate, derived
+from optical_model import optical_settings
 import simulation_progress as progress
 import simulation_stop as stopping
 
 SWEEP_FIELDS = [row for row in FIELDS
                 if row[0] not in ('Experimental tolerances', 'Simultaneous resonance', 'Numerics')
-                and row[-1] != 'boolean']
+                and row[-1] not in ('boolean', 'dissipation', 'atomic_spectrum', 'optical_scheme')]
 MAX_POINTS = 501
 
 
 def sweep_configs(config, parameter, start, stop, step):
     """Return validated points on start + n*step, without overshooting stop."""
+    if parameter == 'OMEGA' and optical_settings(config):
+        raise ValueError('OMEGA is derived from OPTICAL_SCHEME; edit the single-photon laser parameters instead.')
     if parameter not in {row[1] for row in SWEEP_FIELDS}:
         raise ValueError('Choose a supported continuous model parameter.')
     try:

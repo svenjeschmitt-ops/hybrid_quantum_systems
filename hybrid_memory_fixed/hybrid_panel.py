@@ -56,6 +56,9 @@ MODES = [
 
 # Symbols use the same notation as the equations beneath each tab.
 PARAMETER_SYMBOLS = {
+    "ATOMIC_SPECTRUM": r"E_i(E),d_{ij}(E)",
+    "OPTICAL_SCHEME": r"H_{\mathrm{opt}}",
+    "DISSIPATION": r"\mathcal{L}_{\mathrm{additional}}",
     "CONSTANT_FLUX": r"\phi(t)=\phi_{\mathrm{swap}}",
     "CONSTANT_FIELD": r"E(t)=V_{\mathrm{swap}}/\ell+E_{\mathrm{stray}}",
     "SIM_HOLD_SCALE": r"s_{\mathrm{sim}}",
@@ -143,17 +146,11 @@ SECTION_EQUATIONS = {
             r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{hold}}=s_{\mathrm{sim}}\pi/G$",
             r"$P_{\max}=4g_{TC}^2g_{AC}^2/(g_{TC}^2+g_{AC}^2)^2$",
         ),
-        "Enable Simultaneous resonance in Coupling parameters and set its hold multiplier and ramp duration below. "
-        "By default both controls ramp from park to a shared resonant hold, then return to park. "
-        "The transmon and atom tabs offer separate constant-control options: each holds that control "
-        "at its entered value through preparation, mapping and storage, without parking or automatic retuning. Enable either or both. "
-        "Pulsed controls are tuned to cavity resonance. Constant controls use PHI_SWAP and V_SWAP, including detuned values. "
-        "Sequential pulse multipliers apply only to sequential modes. Optical carriers follow the actual preparation/mapping field. "
-        "Calculated coupling is evaluated at the actual interaction flux; manual mode uses your entered strengths. The hold multiplier starts at "
-        "the first ideal transfer maximum for an initial e,0,r0 state; ramps, exchange during optical pulses, losses and spectator interactions can shift it. "
-        "Unequal couplings limit ideal transfer; unity requires equal coupling magnitudes. "
-        "This output writes to atomic memory and includes the configured storage hold. "
-        "Experimental tolerances apply in both directions, with nominal controls and phase calibration fixed. Plots show sampled ranges.",
+        "Both controls ramp to cavity resonance, hold, then return to park. "
+        "Set the hold multiplier and ramp duration below. "
+        "Constant-control options keep the entered flux or voltage throughout the sequence. "
+        "A multiplier of 1 targets the first ideal transfer maximum; equal coupling magnitudes give full ideal transfer. "
+        "Ramps and losses can shift the optimum. Output includes the storage hold.",
     ),
     "Cavity and transmon": (
         (
@@ -199,18 +196,21 @@ SECTION_EQUATIONS = {
         ),
         "Enable Hold electric field constant at entered voltage to use V_SWAP / electrode separation + stray field in every stage, whether resonant or detuned; parked field is then unused. "
         "ℓ is electrode separation in cm; E is in V/cm and K is in MHz/(V/cm)². "
-        "η is relative unwanted optical amplitude.",
+        "η is relative unwanted optical amplitude. ATOMIC_SPECTRUM overrides energies and signed cavity dipoles "
+        "with field tables; scalar Stark formulas describe the default approximation. See PHYSICAL_HAMILTONIAN.md.",
     ),
     "Loss and coherence": (
         (
-            r"$L_T=\frac{\sigma_-}{\sqrt{T_{1,T}}},\qquad L_c=\frac{a}{\sqrt{T_{1,c}}},\qquad L_{rj}=\frac{|\mathrm{loss}\rangle\langle r_j|}{\sqrt{\tau_{rj}}}$",
+            r"$L_T=\frac{b}{\sqrt{T_{1,T}}},\qquad L_c=\frac{a}{\sqrt{T_{1,c}}},\qquad L_{rj}=\frac{|\mathrm{loss}\rangle\langle r_j|}{\sqrt{\tau_{rj}}}$",
             r"$L_{\phi,T}=\frac{Z_T}{\sqrt{2T_{\phi,T}}},\qquad L_{\phi,R}=\frac{Z_R}{\sqrt{2T_{\phi,R}}},\qquad L_{\phi,H}=\frac{Z_H}{\sqrt{2T_{\phi,H}}}$",
-            r"$Z_T=P_e-P_g,\qquad Z_R=P_{r1}-P_{r0},\qquad Z_H=P_{h1}-P_{h0}$",
+            r"$Z_T=2b^\dagger b-I,\qquad Z_R=P_{r1}-P_{r0},\qquad Z_H=P_{h1}-P_{h0}$",
             r"$\frac{1}{T_{2,T}}=\frac{1}{2T_{1,T}}+\frac{1}{T_{\phi,T}},\qquad Q_c=2\pi f_cT_{1,c}$",
         ),
         "All lifetimes are in μs; T_phi denotes pure dephasing, not total T2. "
         "Rydberg decay includes r0, r1, and the unwanted level. "
-        "The T2 relation shown is for the transmon; cavity T1 is photon-number lifetime.",
+        "The T2 relation shown is the zero-temperature logical-qubit limit; cavity T1 is photon-number lifetime. "
+        "DISSIPATION accepts a JSON object for thermal occupation, measured ladder rates, atomic branching, "
+        "white control noise and pulse-dependent optical scattering; see DISSIPATION.md. Empty {} preserves the original channels.",
     ),
     "Pulses and input state": (
         (
@@ -219,6 +219,8 @@ SECTION_EQUATIONS = {
             r"$w(u)=\sin^2(\pi u/T_{\mathrm{swap}}),\quad 0\leq u\leq T_{\mathrm{swap}};\qquad w=0\ \mathrm{outside}$",
             r"$|\psi_T\rangle=\cos(\vartheta/2)|g\rangle+e^{i\varphi}\sin(\vartheta/2)|e\rangle,\qquad t_{\mathrm{end}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
         ),
+        "OPTICAL_SCHEME supplies physical two-photon parameters in effective or explicit mode; "
+        "OMEGA and pulse duration are then derived, with light shifts and scattering included. "
         "Times are in μs. Optical envelopes vanish outside "
         "their pulse intervals. Flux and field use a rounded sin-squared pulse with zero endpoint slopes and no flat hold. "
         "GAP separates operations. Input Bloch angles are entered in degrees. "
@@ -242,9 +244,9 @@ SECTION_EQUATIONS = {
             r"$i\,\frac{d|\psi\rangle}{dt}=H|\psi\rangle\quad\mathrm{(noiseless)},\qquad \Delta t_{\mathrm{internal}}\leq\Delta t_{\max}=\mathrm{MAX\_STEP}$",
             r"$D=N_T N_c(6+N_{extra}),\qquad N_T\geq2,\quad N_c\geq3$",
         ),
-        "NT sets the weakly anharmonic transmon ladder size. RYDBERG_MANIFOLD is a JSON array "
-        "of additional atomic levels; see multilevel_example.json and README.txt for units and fields. "
-        "Defaults include one illustrative upper neighbor. Set NT=2 and the array to [] for the original basis. "
+        "NT sets the weakly anharmonic transmon ladder size. Additional atomic levels can be configured "
+        "through settings files; see multilevel_example.json and README.txt. "
+        "Defaults include one illustrative upper neighbor. "
         "Compare increasing bases with fixed controls before claiming convergence.",
     ),
 }
@@ -306,7 +308,7 @@ class ParameterPanel:
         height=min(1100,int(root.winfo_screenheight()*.90))
         root.geometry(f"{width}x{height}")
         root.minsize(min(width,1100),min(height,700))
-        self.entries={}
+        self.entries={"RYDBERG_MANIFOLD":tk.StringVar(value=str(DEFAULTS["RYDBERG_MANIFOLD"]))}
         self.input_widgets={}
         self.equation_images={}
         self.symbol_images={}
@@ -331,7 +333,7 @@ class ParameterPanel:
             equations=ttk.Frame(tab,padding=(12,16,12,12))
             equations.grid(row=0,column=1,sticky="new")
             equations.columnconfigure(0,weight=1)
-            for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ")):
+            for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ","RYDBERG_MANIFOLD")):
                 label_cell=ttk.Frame(frame)
                 label_cell.grid(row=row,column=0,sticky="w",padx=(0,12),pady=7)
                 ttk.Label(label_cell,text=PARAMETER_CAPTIONS.get(key,label)).pack(side="left")

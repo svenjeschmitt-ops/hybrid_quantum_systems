@@ -10,6 +10,8 @@ def resolved_population_labels(series):
                 continue
             name = {0: "g", 2: "f", 3: "h"}.get(index)
             labels[key] = f"Transmon {name} |{index}>" if name else f"Transmon |{index}>"
+        elif key in ("optical_intermediate_0", "optical_intermediate_1"):
+            labels[key] = "Optical intermediate p"+key[-1]
         elif key.startswith("atom_neighbor_"):
             state = key.removeprefix("atom_neighbor_")
             labels[key] = {"wrong": "r0_wrong", "wrong_upper": "r1_wrong"}.get(state, state)

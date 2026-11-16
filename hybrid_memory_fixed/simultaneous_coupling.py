@@ -11,6 +11,7 @@ import qutip as qt
 
 from hybrid_settings import validate, coupling_strengths, resonant_flux, resonant_field, calculated_swap_field, calculated_transmon_frequency
 from simulation_output import trace, write_report, real_probability
+from atomic_model import AtomicModel
 
 
 def resonance_settings(settings):
@@ -22,10 +23,10 @@ def resonance_settings(settings):
     except ValueError as exc:
         raise ValueError(f'Simultaneous resonance: {exc}') from exc
     # Evaluate the coupling at the actual interaction flux, including detuned constants.
-    rates = coupling_strengths(dict(c, PHI_SWAP=phi))
+    rates = coupling_strengths(dict(c, PHI_SWAP=phi), field=field)
     gt, ga = [2*np.pi*rates[key] for key in ('transmon_coupling_MHz', 'atom_coupling_MHz')]
     dt = calculated_transmon_frequency(c, phi)-c['FC']
-    da = c['F_A_ZERO']+(c['K_R1']-c['K_R0'])*field**2-c['FC']
+    da = float(AtomicModel(c).transition(field))-c['FC']
     return dict(interaction_flux=phi, interaction_field_V_per_cm=field,
                 transmon_detuning_MHz=dt, atom_detuning_MHz=da,
                 on_resonance=bool(abs(dt)<1e-8 and abs(da)<1e-8),
@@ -80,44 +81,22 @@ def model(b, include_storage=True, direction="write"):
         return b.TWOPI*(b.transmon_frequency(flux(t))+b.TOLERANCE_OFFSETS['FT']-b.FC)
 
     def d0(t):
-        return b.TWOPI*b.K_R0*field(t)**2
+        return b.TWOPI*b.atomic_energy_MHz("r0", field(t))
 
     def d1(t):
-        return b.TWOPI*(b.F_A_ZERO+b.TOLERANCE_OFFSETS['FA']-b.FC+b.K_R1*field(t)**2)
+        return b.TWOPI*b.atomic_energy_MHz("r1", field(t))
 
     def dw(t):
-        return b.TWOPI*(b.F_WRONG_SPLIT+b.K_WRONG*field(t)**2)
+        return b.TWOPI*b.atomic_energy_MHz("wrong", field(t))
 
-    # Fix the laser frequencies to the nominal controls, including in error scenarios.
+    # Optical carriers remain tied to the nominal field in every tolerance scenario.
     nominal_field = info['interaction_field_V_per_cm'] if constant_field else b.E_PARK
-    optical_r0 = b.TWOPI*b.K_R0*nominal_field**2
-    optical_r1 = b.TWOPI*(b.F_A_ZERO-b.FC+b.K_R1*nominal_field**2)
-
-    def prep_drive(t):
-        return .5*b.optical_envelope(t, *prep)*np.exp(-1j*optical_r0*(t-prep[0]))
-
-    def map0(t):
-        return .5*b.optical_envelope(t, *mapping)*np.exp(1j*optical_r0*(t-mapping[0]))
-
-    def map1(t):
-        return .5*b.optical_envelope(t, *mapping)*np.exp(1j*optical_r1*(t-mapping[0]))
-
-    gt, ga = info['g_TC_rad_per_us'], info['g_AC_rad_per_us']
-    interaction = gt*(b.a.dag()*b.sm+b.a*b.sm.dag()) + ga*(b.a*b.Rplus+b.a.dag()*b.Rplus.dag())
-    terms = [interaction + b.H_anharm, [b.n, b.cavity_error], [b.Nt, dt], [b.Pr0, d0], [b.Pr1, d1], [b.Pwrong_base, dw],
-             *b.extra_atomic_terms(field)]
-    drives = ((b.Bprep, prep_drive), (b.Bmap0, map0), (b.Bmap1, map1))
-    if direction == "read":
-        # Excite both memory arms before exchange; de-excite r0 afterwards.
-        def unmap0(t):
-            return .5*b.optical_envelope(t, *prep)*np.exp(-1j*optical_r0*(t-prep[0]))
-        def unmap1(t):
-            return .5*b.optical_envelope(t, *prep)*np.exp(-1j*optical_r1*(t-prep[0]))
-        drives = ((b.Bmap0.dag(), unmap0), (b.Bmap1.dag(), unmap1),
-                  (b.Bprep.dag(), map0))
-    for op, coeff in drives:
-        terms.extend([[op, coeff], [op.dag(), lambda t, f=coeff: np.conj(f(t))]])
-    h = qt.QobjEvo(terms)
+    terms = [*b.coupling_terms(field, info['g_TC_rad_per_us']), b.H_anharm,
+             [b.n, b.cavity_error], [b.Nt, dt], [b.Pr0, d0], [b.Pr1, d1],
+             [b.Pwrong_base, dw], *b.extra_atomic_terms(field)]
+    pulses = ([(0, prep), (0, mapping), (1, mapping)] if direction == "write"
+              else [(0, prep), (1, prep), (0, mapping)])
+    h = qt.QobjEvo(terms)+b.optical_protocol(pulses, nominal_field)[0]
     points = [np.linspace(0, mapping[1], 1401), np.array([
         *prep, start, start+ramp, end-ramp, end, *mapping])]
     if include_storage and b.STORAGE and direction == "write":
@@ -134,6 +113,31 @@ def model(b, include_storage=True, direction="write"):
     return h, np.unique(np.concatenate(points)), info, flux, voltage, field
 
 
+def collapse_channels(b, include_storage=True, direction="write"):
+    """Bind dissipation to the simultaneous controls and optical timing."""
+    _, _, info, flux, _, field = model(b, include_storage, direction)
+    intervals = info['stages']
+    first = intervals['Preparation' if direction == 'write' else 'Memory to Rydberg']
+    last = intervals['Optical mapping' if direction == 'write' else 'Return atom to h0']
+    def optical0(t):
+        return b.optical_envelope(t, *first)+b.optical_envelope(t, *last)
+    def optical1(t):
+        return b.optical_envelope(t, *(last if direction == 'write' else first))
+    pulses = ([(0, first), (0, last), (1, last)] if direction == 'write'
+              else [(0, first), (1, first), (0, last)])
+    nominal_field = info['interaction_field_V_per_cm'] if info['constant_field'] else b.E_PARK
+    return b.protocol_c_ops(flux, field, optical0, optical1,
+                           b.optical_protocol(pulses, nominal_field)[1])
+
+
+def storage_channels(b, include_storage=True, direction="write"):
+    _, _, info, flux, _, field = model(b, include_storage, direction)
+    time = info['mapping_end_us'] if direction == 'write' else 0.0
+    # The read storage hold occurs BEFORE the first optical pulse.
+    return b.parked_c_ops(b.protocol_c_ops(lambda t: flux(time), lambda t: field(time),
+                                         lambda t: 0.0, lambda t: 0.0), 0.0)
+
+
 def simulate(b, alpha, beta, noisy=True, include_storage=True, storage_solver=None, direction="write"):
     h, times, info, *_ = model(b, include_storage, direction)
     if direction == "write":
@@ -143,7 +147,7 @@ def simulate(b, alpha, beta, noisy=True, include_storage=True, storage_solver=No
         if include_storage and b.STORAGE:
             # Independent atomic input: storage precedes retrieval with no reset.
             if noisy:
-                solver = storage_solver or b.ParkedSolver(h(0), b.C_OPS)
+                solver = storage_solver or b.ParkedSolver(h(0), storage_channels(b, include_storage, direction))
                 initial = solver.run(initial, [0, b.STORAGE]).states[-1]
             else:
                 initial = (-1j*h(0)*b.STORAGE).expm()*initial
@@ -151,7 +155,7 @@ def simulate(b, alpha, beta, noisy=True, include_storage=True, storage_solver=No
                    max_step=min(b.MAX_STEP, info['ramp_us']/4) if info['ramp_us'] else b.MAX_STEP, nsteps=100000)
     dynamics_times = times[times <= info['mapping_end_us']]
     if noisy:
-        result = stopping.solve(qt.mesolve, h, initial.proj() if initial.isket else initial, dynamics_times, c_ops=b.C_OPS, options=options)
+        result = stopping.solve(qt.mesolve, h, initial.proj() if initial.isket else initial, dynamics_times, c_ops=collapse_channels(b, include_storage, direction), options=options)
     else:
         result = stopping.solve(qt.sesolve, h, initial, dynamics_times, options=options)
     states = list(result.states)
@@ -159,7 +163,7 @@ def simulate(b, alpha, beta, noisy=True, include_storage=True, storage_solver=No
     if len(storage_times):
         storage_hamiltonian = h(info['mapping_end_us'])
         if noisy:
-            solver = storage_solver or b.ParkedSolver(storage_hamiltonian, b.C_OPS)
+            solver = storage_solver or b.ParkedSolver(storage_hamiltonian, storage_channels(b, include_storage, direction))
             held = solver.run(states[-1], np.r_[0., storage_times]).states
         else:
             held = stopping.solve(qt.sesolve, storage_hamiltonian, states[-1], np.r_[0., storage_times],
@@ -175,7 +179,7 @@ def control_samples(b, times, direction):
     offsets = b.TOLERANCE_OFFSETS
     return dict(flux=phi, field=electric,
                 transmon_detuning=b.transmon_frequency(phi)+offsets['FT']-b.FC-offsets['FC'],
-                atom_detuning=b.F_A_ZERO+offsets['FA']+(b.K_R1-b.K_R0)*electric**2-b.FC-offsets['FC'])
+                atom_detuning=b.atom_detuning_MHz(electric)-offsets['FC'])
 
 
 def run(b, save=False, direction="write"):
@@ -195,7 +199,7 @@ def run(b, save=False, direction="write"):
     theta, phi = np.deg2rad([b._SETTINGS['INPUT_THETA'], b._SETTINGS['INPUT_PHI']])
     alpha, beta = np.cos(theta/2), np.exp(1j*phi)*np.sin(theta/2)
     h, _, setup, *_ = model(b, direction=direction)
-    storage_solver = (b.ParkedSolver(h(setup['mapping_end_us'] if writing else 0), b.C_OPS) if b.STORAGE else None)
+    storage_solver = (b.ParkedSolver(h(setup['mapping_end_us'] if writing else 0), storage_channels(b, direction=direction)) if b.STORAGE else None)
     times, states, info = simulate(b, alpha, beta, storage_solver=storage_solver, direction=direction)
     target = joint_target(alpha, beta)
     fidelity = np.real(qt.expect(target.proj(), states))
@@ -258,7 +262,7 @@ def run(b, save=False, direction="write"):
         'controls': trace(times, flux=[flux(t) for t in times], voltage_V=[voltage(t) for t in times]),
         'detunings_MHz': trace(times,
             transmon=[b.transmon_frequency(flux(t))-b.FC for t in times],
-            atom=[b.F_A_ZERO+(b.K_R1-b.K_R0)*field(t)**2-b.FC for t in times]),
+            atom=[b.atom_detuning_MHz(field(t), offsets=False) for t in times]),
     }
     traces.update(tolerance_bands.report_traces(bands))
     summary['tolerance_ranges'] = bands['summary'] if bands else None
@@ -288,7 +292,7 @@ def run(b, save=False, direction="write"):
                         bbox_to_anchor=(.5, .88), ncol=2, fontsize=8, framealpha=1)
     detuning_axis.plot(x, [b.transmon_frequency(flux(t))-b.FC for t in x],
                        color='tab:blue', label='Transmon')
-    detuning_axis.plot(x, [b.F_A_ZERO+(b.K_R1-b.K_R0)*field(t)**2-b.FC for t in x],
+    detuning_axis.plot(x, [b.atom_detuning_MHz(field(t), offsets=False) for t in x],
                        color='tab:orange', linestyle='--', label='Atom')
     detuning_axis.axhline(0, color='gray', linewidth=.7, alpha=.5)
     detuning_axis.set(title='Detuning from cavity', ylabel='Detuning (MHz)')

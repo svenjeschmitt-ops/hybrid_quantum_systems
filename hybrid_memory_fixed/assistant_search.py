@@ -13,6 +13,8 @@ import time
 
 from hybrid_settings import (DEFAULTS, calculated_swap_field, calculated_transmon_frequency,
                              derived, resonant_flux, resonant_field, validate)
+from atomic_model import AtomicModel
+from optical_model import optical_settings
 from simulation_output import real_probability
 from assistant_calculations import (MODES, CONTROL_FIELDS, ComparisonCancelled, _score,
                                     evaluate_backend)
@@ -56,6 +58,8 @@ def locked_controls(config):
         keys+=['CONSTANT_FIELD','V_SWAP','GAP_CM','STRAY_FIELD','E_PARK']
     if config['CONSTANT_FLUX']:
         keys+=['CONSTANT_FLUX','PHI_SWAP','PHI_PARK']
+    if optical_settings(config):
+        keys.append('OMEGA')  # Derived from the physical laser parameters.
     return {key:config[key] for key in keys}
 
 
@@ -63,10 +67,70 @@ def field_diagnostics(config):
     if not config['CONSTANT_FIELD']:
         return None
     electric=calculated_swap_field(config)
-    frequency=config['F_A_ZERO']+(config['K_R1']-config['K_R0'])*electric**2
+    frequency=float(AtomicModel(config).transition(electric))
     return dict(field_V_per_cm=electric,voltage_V=config['V_SWAP'],
                 atomic_transition_MHz=frequency,cavity_MHz=config['FC'],
                 atomic_detuning_MHz=frequency-config['FC'])
+
+
+def physical_search_space(c, mode, vary_cavity=False):
+    """Search applied controls directly when a quadratic inversion is unavailable."""
+    import numpy as np
+    atom = AtomicModel(c)
+    entries = []
+    def add(key, low, high, logarithmic=False):
+        entries.append((key, (math.log(low), math.log(high)) if logarithmic else (low, high), logarithmic))
+    if vary_cavity:
+        low = max(1., calculated_transmon_frequency(c,.5)+201, .65*c['FC'])
+        high = min(calculated_transmon_frequency(c,0)-201, 1.35*c['FC'])
+        if mode.startswith('Simultaneous cavity resonance:') and not c['CONSTANT_FIELD']:
+            if atom.domain is not None:
+                frequencies = atom.transition(np.linspace(*atom.domain, 257))
+                low, high = max(low, float(np.min(frequencies))), min(high, float(np.max(frequencies)))
+            elif c['K_R1'] < c['K_R0']:
+                high = min(high, c['F_A_ZERO']-1e-6)
+            elif c['K_R1'] > c['K_R0']:
+                low = max(low, c['F_A_ZERO']+1e-6)
+            else:
+                raise ValueError('A variable cavity search needs a tunable atomic transition or a constant field.')
+        add('FC', low, high)
+    if mode.startswith('Simultaneous cavity resonance:'):
+        add('SIM_HOLD_SCALE', .4, 2.5, True)
+        if not (c['CONSTANT_FLUX'] and c['CONSTANT_FIELD']):
+            add('SIM_RAMP', c['SIM_RAMP']*.2, c['SIM_RAMP']*5, True)
+    else:
+        if not c['CONSTANT_FLUX']:
+            add('PHI_SWAP', max(0., c['PHI_SWAP']-.08), min(.5, c['PHI_SWAP']+.08))
+        add('TC_PULSE_SCALE', .4, 25., True)
+        if not c['CONSTANT_FIELD']:
+            field = calculated_swap_field(c)
+            low, high = (atom.domain if atom.domain is not None else
+                         (field-max(1.,abs(field)*.5), field+max(1.,abs(field)*.5)))
+            low, high = low+c['EFIELD_TOL'], high-c['EFIELD_TOL']
+            add('V_SWAP', c['GAP_CM']*(low-c['STRAY_FIELD']), c['GAP_CM']*(high-c['STRAY_FIELD']))
+        add('AC_PULSE_SCALE', .4, 25., True)
+    if not optical_settings(c):
+        add('OMEGA', c['OMEGA']*.5, c['OMEGA']*2, True)
+    add('GAP', 0., max(.03, c['GAP']*2))
+    if any(low >= high for _, (low, high), _ in entries):
+        raise ValueError('No nonempty physical-control search interval is available.')
+    keys = [key for key, _, _ in entries]
+    bounds = [bound for _, bound, _ in entries]
+    def encode(values):
+        return np.clip([math.log(values[key]) if log else values[key] for key, _, log in entries],
+                       [low for low, high in bounds], [high for low, high in bounds])
+    def decode(values):
+        return validate({**c, **{key: float(math.exp(x) if log else x)
+                                for (key, _, log), x in zip(entries, values)}})
+    seed = dict(c)
+    try:
+        if 'PHI_SWAP' in keys:
+            seed['PHI_SWAP'] = resonant_flux(c)
+        if 'V_SWAP' in keys:
+            seed['V_SWAP'] = c['GAP_CM']*(resonant_field(c)-c['STRAY_FIELD'])
+    except ValueError:
+        pass
+    return keys, bounds, encode(c), [encode(c), encode(seed)], decode
 
 
 def search_space(config, mode, vary_cavity=False):
@@ -75,6 +139,8 @@ def search_space(config, mode, vary_cavity=False):
     c = validate(config)
     if mode not in MODES:
         raise ValueError('Unsupported search output mode.')
+    if json.loads(c.get('ATOMIC_SPECTRUM', '{}')) or optical_settings(c):
+        return physical_search_space(c, mode, vary_cavity)
     if vary_cavity:
         keys,bounds,current,seeds,_=search_space(c,mode,False)
         fmin=calculated_transmon_frequency(c,.5)+201
