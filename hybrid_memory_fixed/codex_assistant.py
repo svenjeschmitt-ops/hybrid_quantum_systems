@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 
-from hybrid_settings import (FIELDS, derived, validate, coupling_strengths,
+from hybrid_settings import (FIELDS, PULSE_DELAY_KEYS, active_delay_keys, derived, validate, coupling_strengths,
                              resonant_flux, resonant_field)
 from simulation_output import load_reports
 
@@ -32,6 +32,13 @@ When enabled, cavity frequency may vary while constant field/flux controls remai
 FC is the cavity frequency. OMEGA is the optical Rabi frequency divided by 2*pi,
 not the cavity frequency. PHI_SWAP/PHI_PARK are peak/park flux in Phi/Phi0;
 V_SWAP is peak electrode voltage. TC_PULSE_SCALE/AC_PULSE_SCALE stretch the pulses.
+WRITE_PULSE_DELAY_NS and READ_PULSE_DELAY_NS independently set voltage peak time
+minus flux peak time for writing and reading, in ns: zero aligns
+centers, positive means voltage later, negative means voltage earlier, in BOTH
+transfer directions. Null/auto retains historical sequential ordering. It does not
+change pulse widths, peaks, resonance, optical carrier phases, or quantum phase.
+The panel uses this timing control instead of the simultaneous-resonance checkbox.
+Zero delay alone does not imply resonance or matched pulse widths.
 The model has NT weakly anharmonic transmon levels, NC cavity states, and
 six base atomic states h0,h1,r0,r1,loss,wrong plus RYDBERG_MANIFOLD neighbors.
 NT defaults to 3; the default extra level is wrong_upper. Atomic neighbor
@@ -42,9 +49,11 @@ Wrong-Rydberg population sums wrong and all added atomic neighbors.
 Both TC and AC couplings remain on at all times.
 Use current_panel.protocol to distinguish the active implementation. Sequential flux and
 field use rounded sin-squared excursions without a flat hold; their duration is
-scale*(2*RAMP+pi/(2*g)), not a guaranteed swap. Simultaneous exchange instead has
-a shared flat hold with smooth ramps, or constant entered controls. Its reference
-hold is pi/sqrt(g_TC^2+g_AC^2). Sequential pulse scales and RAMP are unused there.
+scale*(2*RAMP+pi/(2*g)), not a guaranteed swap. Simultaneous exchange uses aligned rounded sin-squared excursions too, or constant
+entered controls. Its duration is SIM_HOLD_SCALE*(2*SIM_RAMP+pi/sqrt(g_TC^2+g_AC^2));
+the SIM_RAMP contribution is zero when both controls are constant. The ideal exchange
+reference assumes constant resonance, not rounded pulses. Sequential pulse scales
+and RAMP are unused there.
 In simultaneous mode PHI_SWAP/V_SWAP are unused unless the corresponding constant
 control is enabled. Do not advise changing inactive_parameters or locked_parameters. Constant entered field/flux controls are fixed across assistant trials as well as during each run.
 The calculated resonance_reference values are exact model references, NOT optimized
@@ -60,8 +69,9 @@ Use verified_sweep_evidence when present; its ranking is only over tested points
 When no verified tuning data exist, state that optimized values are unavailable.
 Offer one concrete next comparison using active controls, preserving calibrated
 settings. Do not return the current settings as if they were an improvement.
-The panel supports sequential parameter sweeps; simultaneous parameter sweeps and
-noise on/off switches are not available in the panel. Tolerance ranges are fixed
+The panel supports parameter sweeps including either signed pulse-delay field;
+zero-delay and overlapping pulses use the same sweep workflow. Legacy --simultaneous
+CLI sweeps and noise on/off switches are not available in the panel. Tolerance ranges are fixed
 error sensitivity tests, not control optimization. Changing INPUT_THETA/INPUT_PHI,
 turning off tolerances, shortening the requested memory hold, or making lifetimes
 arbitrarily long does not establish a better transfer protocol.
@@ -159,7 +169,7 @@ def tuning_context(config, mode):
     quantities = derived(config)
     error = None
     if simultaneous:
-        inactive += ['TC_PULSE_SCALE', 'AC_PULSE_SCALE', 'RAMP']
+        inactive += ['TC_PULSE_SCALE', 'AC_PULSE_SCALE', 'RAMP', *PULSE_DELAY_KEYS]
         if not config['CONSTANT_FLUX']:
             inactive.append('PHI_SWAP')
         if not config['CONSTANT_FIELD']:
@@ -171,12 +181,16 @@ def tuning_context(config, mode):
             quantities = resonance_settings(config)
             quantities['hold_us'] = config['SIM_HOLD_SCALE']*quantities['reference_hold_us']
             quantities['ramp_us'] = 0 if config['CONSTANT_FLUX'] and config['CONSTANT_FIELD'] else config['SIM_RAMP']
+            quantities['pulse_duration_us'] = config['SIM_HOLD_SCALE']*(2*quantities['ramp_us']+quantities['reference_hold_us'])
+            quantities['pulse_shape'] = 'constant' if config['CONSTANT_FLUX'] and config['CONSTANT_FIELD'] else 'sin_squared'
         except ValueError as exc:
             quantities, error = {}, str(exc)
     else:
         inactive += ['SIM_HOLD_SCALE', 'SIM_RAMP']
+        inactive += [key for key in PULSE_DELAY_KEYS if key not in active_delay_keys(mode)]
+        quantities['configured_pulse_delays_ns'] = {key: config[key] for key in PULSE_DELAY_KEYS}
     from assistant_search import locked_controls
-    return dict(locked_parameters=locked_controls(config),protocol='simultaneous' if simultaneous else 'sequential', derived=quantities,
+    return dict(locked_parameters=locked_controls(config),protocol='simultaneous' if simultaneous else ('pulse_delay' if any(config[key] is not None for key in active_delay_keys(mode)) else 'sequential'), derived=quantities,
                 inactive_parameters=inactive, resonance_reference=reference, error=error,
                 parameter_sweep_supported=not simultaneous,
                 tuning_status='No optimization was run while preparing this advice.')

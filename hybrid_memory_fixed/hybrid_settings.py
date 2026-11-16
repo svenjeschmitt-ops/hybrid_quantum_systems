@@ -55,6 +55,8 @@ FIELDS = [
 ("Pulses and input state","RAMP","Extra duration per pulse half","us",0.0005,"positive"),
 ("Pulses and input state","TC_PULSE_SCALE","Transmon pulse duration multiplier","dimensionless",9.664304506350172,"positive"),
 ("Pulses and input state","AC_PULSE_SCALE","Atomic pulse duration multiplier","dimensionless",3.3585450169623496,"positive"),
+("Pulses and input state","WRITE_PULSE_DELAY_NS","Write pulse delay (transmon to atom)","ns or auto","auto","optional_delay"),
+("Pulses and input state","READ_PULSE_DELAY_NS","Read pulse delay (atom to transmon)","ns or auto","auto","optional_delay"),
 ("Pulses and input state","GAP","Delay between operations","us",0.01,"nonnegative"),
 ("Pulses and input state","STORAGE","Memory storage duration","us",5.0,"nonnegative"),
 ("Pulses and input state","INPUT_THETA","Input Bloch polar angle","degrees",90.0,"free"),
@@ -64,14 +66,25 @@ FIELDS = [
 ("Experimental tolerances","FA_TOL","Atomic transition frequency tolerance (+/-)","MHz",0.0,"nonnegative"),
 ("Experimental tolerances","FLUX_TOL","Applied flux tolerance (+/-)","Phi/Phi0",0.0,"nonnegative"),
 ("Experimental tolerances","EFIELD_TOL","Total electric field tolerance (+/-)","V/cm",0.0,"nonnegative"),
-("Simultaneous resonance","SIM_HOLD_SCALE","Resonant hold time multiplier","dimensionless",1.0,"positive"),
-("Simultaneous resonance","SIM_RAMP","Simultaneous tuning ramp duration","us",0.0005,"positive"),
+("Simultaneous resonance","SIM_HOLD_SCALE","Simultaneous pulse duration multiplier","dimensionless",1.0,"positive"),
+("Simultaneous resonance","SIM_RAMP","Simultaneous pulse ramp reference","us",0.0005,"positive"),
 ("Numerics","MAX_STEP","Maximum solver time step","us",0.0005,"positive"),
 ("Numerics","NT","Number of transmon levels","integer",3,"transmon_integer"),
 ("Numerics","RYDBERG_MANIFOLD","Additional Rydberg levels","JSON array",DEFAULT_MANIFOLD,"manifold"),
 ("Numerics","NC","Number of cavity Fock states","integer",3,"integer"),
 ]
 DEFAULTS = {key: default for _,key,_,_,default,_ in FIELDS}
+PULSE_DELAY_KEYS = ("WRITE_PULSE_DELAY_NS", "READ_PULSE_DELAY_NS")
+
+
+def active_delay_keys(mode):
+    """Delay controls used by a selected transfer direction."""
+    name = mode.lower()
+    if name.endswith("transmon to atom"):
+        return PULSE_DELAY_KEYS[:1]
+    if name.endswith("atom to transmon"):
+        return PULSE_DELAY_KEYS[1:]
+    return PULSE_DELAY_KEYS
 
 
 def resonant_flux(config):
@@ -164,6 +177,12 @@ def validate(values):
     if "N_01" in values:
         raise ValueError("N_01 is now calculated from the effective Josephson energy at "
                          "the swap flux and EC. Remove N_01 from saved settings.")
+    # Migrate the former shared delay without overwriting explicit new values.
+    values = dict(values)
+    if "PULSE_DELAY_NS" in values:
+        previous_delay = values.pop("PULSE_DELAY_NS")
+        for key in PULSE_DELAY_KEYS:
+            values.setdefault(key, previous_delay)
     unknown = set(values) - set(DEFAULTS)
     if unknown:
         raise ValueError("Unknown settings: " + ", ".join(sorted(unknown)))
@@ -172,6 +191,9 @@ def validate(values):
     for _,key,label,_,_,rule in FIELDS:
         if rule in ("dissipation", "atomic_spectrum", "optical_scheme"):
             continue  # Validate after NT and the atomic manifold have been parsed.
+        if rule == "optional_delay" and (config[key] is None or str(config[key]).strip().lower() == "auto"):
+            config[key] = None
+            continue
         if rule == "manifold":
             config[key] = json.dumps(parse_manifold(config[key]), sort_keys=True)
             continue
@@ -224,6 +246,31 @@ def validate(values):
     return config
 
 
+def pulse_intervals(config, start, transmon_duration, atom_duration, direction="write"):
+    """Place rounded pulses with delay = voltage center minus flux center.
+
+    Missing/auto delay preserves historical sequential timing for saved settings.
+    Explicit zero aligns centers even when the two pulse widths differ.
+    """
+    if direction not in ("write", "read"):
+        raise ValueError("direction must be write or read")
+    delay = config.get(direction.upper()+"_PULSE_DELAY_NS", config.get("PULSE_DELAY_NS"))
+    if delay is None or str(delay).strip().lower() == "auto":
+        if direction == "write":
+            tc = (start, start+transmon_duration)
+            ac = (tc[1]+config["GAP"], tc[1]+config["GAP"]+atom_duration)
+        else:
+            ac = (start, start+atom_duration)
+            tc = (ac[1]+config["GAP"], ac[1]+config["GAP"]+transmon_duration)
+        return tc, ac
+    # Normalize the common time origin so neither pulse overlaps preparation.
+    tc_start = -transmon_duration/2
+    ac_start = float(delay)/1000-atom_duration/2
+    origin = start-min(tc_start, ac_start)
+    return ((origin+tc_start, origin+tc_start+transmon_duration),
+            (origin+ac_start, origin+ac_start+atom_duration))
+
+
 def derived(config):
     c=effective_controls(validate(config))
     couplings=coupling_strengths(c)
@@ -231,7 +278,14 @@ def derived(config):
     swap_field = calculated_swap_field(c)
     swap_voltage = c["V_SWAP"]
     swap_flux = c["PHI_SWAP"]
+    tc_duration = c["TC_PULSE_SCALE"]*(2*c["RAMP"]+1/(4*couplings["transmon_coupling_MHz"]))
+    ac_duration = c["AC_PULSE_SCALE"]*(2*c["RAMP"]+1/(4*couplings["atom_coupling_MHz"]))
+    delays = {}
+    for direction in ("write", "read"):
+        tc, ac = pulse_intervals(c, 0., tc_duration, ac_duration, direction)
+        delays[direction+"_pulse_delay_ns"] = 1000*((ac[0]+ac[1])/2-(tc[0]+tc[1])/2)
     return {
+        **delays,
         **couplings,
         **operating_point,
         "transmon_park_frequency_MHz": calculated_transmon_frequency(c, c["PHI_PARK"]),

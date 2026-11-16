@@ -36,18 +36,6 @@ def resonance_settings(settings):
                 ideal_transfer_limit=4*(gt*ga/(gt*gt+ga*ga))**2)
 
 
-def plateau(t, start, hold, ramp):
-    """A flat resonant interval with smooth ramps from and back to park."""
-    u = t-start
-    if u <= 0 or u >= 2*ramp+hold:
-        return 0.0
-    if u < ramp:
-        return float(np.sin(np.pi*u/(2*ramp))**2)
-    if u <= ramp+hold:
-        return 1.0
-    return float(np.sin(np.pi*(2*ramp+hold-u)/(2*ramp))**2)
-
-
 def model(b, include_storage=True, direction="write"):
     """Shared exchange pulse with independently optional constant controls."""
     if direction not in ("write", "read"):
@@ -58,21 +46,22 @@ def model(b, include_storage=True, direction="write"):
     constant_field = bool(c['CONSTANT_FIELD'])
     ramp = 0.0 if constant_flux and constant_field else c['SIM_RAMP']
     hold = c['SIM_HOLD_SCALE']*info['reference_hold_us']
+    duration = c['SIM_HOLD_SCALE']*(2*ramp+info['reference_hold_us'])
     prep = (0.0, b.T_OPT)
     start = prep[1]+b.GAP
-    end = start+2*ramp+hold
+    end = start+duration
     mapping = (end+b.GAP, end+b.GAP+b.T_OPT)
     finish = mapping[1]+(b.STORAGE if include_storage and direction == "write" else 0.0)
 
     def flux(t):
         if constant_flux:
             return info['interaction_flux']+b.TOLERANCE_OFFSETS['FLUX']
-        return b.PHI_PARK+(info['interaction_flux']-b.PHI_PARK)*plateau(t, start, hold, ramp)+b.TOLERANCE_OFFSETS['FLUX']
+        return b.PHI_PARK+(info['interaction_flux']-b.PHI_PARK)*b.smooth_window(t, start, end)+b.TOLERANCE_OFFSETS['FLUX']
 
     def field(t):
         if constant_field:
             return info['interaction_field_V_per_cm']+b.TOLERANCE_OFFSETS['EFIELD']
-        return b.E_PARK+(info['interaction_field_V_per_cm']-b.E_PARK)*plateau(t, start, hold, ramp)+b.TOLERANCE_OFFSETS['EFIELD']
+        return b.E_PARK+(info['interaction_field_V_per_cm']-b.E_PARK)*b.smooth_window(t, start, end)+b.TOLERANCE_OFFSETS['EFIELD']
 
     def voltage(t):
         return c['V_SWAP'] if constant_field else b.GAP_CM*(field(t)-b.TOLERANCE_OFFSETS['EFIELD']-b.STRAY_FIELD)
@@ -98,10 +87,12 @@ def model(b, include_storage=True, direction="write"):
               else [(0, prep), (1, prep), (0, mapping)])
     h = qt.QobjEvo(terms)+b.optical_protocol(pulses, nominal_field)[0]
     points = [np.linspace(0, mapping[1], 1401), np.array([
-        *prep, start, start+ramp, end-ramp, end, *mapping])]
+        *prep, start, (start+end)/2, end, *mapping])]
     if include_storage and b.STORAGE and direction == "write":
         points.append(np.linspace(mapping[1], finish, 301))
-    info.update(hold_us=hold, ramp_us=ramp, constant_flux=constant_flux,
+    # Retain hold_us as the scaled ideal reference for existing report consumers.
+    info.update(hold_us=hold, ramp_us=ramp, pulse_duration_us=duration,
+                pulse_shape='constant' if constant_flux and constant_field else 'sin_squared', constant_flux=constant_flux,
                 constant_field=constant_field, continuous_resonance=constant_flux and constant_field and info['on_resonance'], mapping_end_us=mapping[1],
                 stages={'Preparation': prep, 'Simultaneous exchange': (start, end),
                         'Optical mapping': mapping, 'Storage': (mapping[1], finish)})
@@ -251,7 +242,7 @@ def run(b, save=False, direction="write"):
     print(f'Simultaneous resonance (nominal): constant flux={info["constant_flux"]}; constant field={info["constant_field"]}.', flush=True)
     print(f"Interaction flux={info['interaction_flux']:.9g}; voltage={info['interaction_voltage_V']:.9g} V", flush=True)
     print(f"g_TC/2pi={info['g_TC_rad_per_us']/b.TWOPI:.6g} MHz; g_AC/2pi={info['g_AC_rad_per_us']/b.TWOPI:.6g} MHz", flush=True)
-    print(f"Hold={info['hold_us']:.6g} us; ideal resonant transfer reference={info['ideal_transfer_limit']:.6f}", flush=True)
+    print(f"Exchange duration={info['pulse_duration_us']:.6g} us; ideal resonant transfer reference={info['ideal_transfer_limit']:.6f}", flush=True)
     print(f'Joint fidelity after mapping={fidelity[index]:.6f}; after storage={fidelity[-1]:.6f}' if writing else f'Joint fidelity after storage and readout={fidelity[-1]:.6f}', flush=True)
     _, _, _, flux, voltage, field = model(b, direction=direction)
     summary['multilevel_dynamics'] = b.multilevel_summary(states)
@@ -314,7 +305,7 @@ def run(b, save=False, direction="write"):
         ['Total write time (preparation through mapping)', f"{info['mapping_end_us']*1000:.2f} ns"],
         ['Storage hold after writing', f'{b.STORAGE:g} µs'],
         ['Total write + storage duration', f"{info['mapping_end_us']+b.STORAGE:.6g} µs"],
-        ['Exchange hold', f"{info['hold_us']*1000:.2f} ns"],
+        ['Exchange duration', f"{info['pulse_duration_us']*1000:.2f} ns"],
         ['Flux control', 'Constant entered value' if info['constant_flux'] else 'Pulsed from park'],
         ['Electric field control', 'Constant entered value' if info['constant_field'] else 'Pulsed from park'],
         ['Ideal resonant reference (initial e,0,r0)', f"{info['ideal_transfer_limit']:.2%}"],

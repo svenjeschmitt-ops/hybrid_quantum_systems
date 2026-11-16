@@ -54,7 +54,7 @@ if _config_args.config:
     except (OSError, ValueError) as exc:
         _config_parser.error(f"Cannot load config {_config_args.config!r}: {exc}")
 
-from hybrid_settings import validate, coupling_strengths, derived, calculated_transmon_frequency, calculated_swap_field, transmon_operating_point, effective_controls
+from hybrid_settings import validate, coupling_strengths, derived, calculated_transmon_frequency, calculated_swap_field, transmon_operating_point, effective_controls, pulse_intervals
 _SETTINGS = validate(_SETTINGS)
 _CONTROL_SETTINGS = effective_controls(_SETTINGS)
 _COUPLINGS = coupling_strengths(_SETTINGS)
@@ -130,9 +130,9 @@ def transmon_frequency(phi):
 PREP = (0.0, T_OPT)
 TC_DURATION = _SETTINGS["TC_PULSE_SCALE"] * (2 * RAMP + np.pi / (2 * G_TC))
 AC_DURATION = _SETTINGS["AC_PULSE_SCALE"] * (2 * RAMP + np.pi / (2 * G_AC))
-TC = (PREP[1] + GAP, PREP[1] + GAP + TC_DURATION)
-AC = (TC[1] + GAP, TC[1] + GAP + AC_DURATION)
-MAP = (AC[1] + GAP, AC[1] + GAP + T_OPT)
+TC, AC = pulse_intervals(_SETTINGS, PREP[1]+GAP, TC_DURATION, AC_DURATION)
+EXCHANGE_END = max(TC[1], AC[1])
+MAP = (EXCHANGE_END + GAP, EXCHANGE_END + GAP + T_OPT)
 T_END = MAP[1] + STORAGE
 
 def smooth_window(t, start, end):
@@ -701,6 +701,7 @@ def main(check=False, save=False):
             metadata={"noise_enabled": True, "input_theta_degrees": float(np.rad2deg(theta)),
                       "input_phi_degrees": float(np.rad2deg(phi)), "phase_correction_rad": float(phase),
                       "stages_us": dict(preparation=PREP, transmon_cavity=TC, atom_cavity=AC, mapping=MAP),
+                      "pulse_delay_ns": 1000*(sum(AC)-sum(TC))/2,
                       "storage_duration_us": STORAGE,
                       "time_origin": "Beginning of writing; dynamics end before the storage hold.",
                       "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",
@@ -839,9 +840,9 @@ def retrieval_model(source="hyperfine"):
         raise ValueError("source must be hyperfine or rydberg")
     unmap = (0.0, T_OPT) if source == "hyperfine" else None
     start = T_OPT + GAP if unmap else 0.0
-    ac = (start, start + (AC[1] - AC[0]))
-    tc = (ac[1] + GAP, ac[1] + GAP + (TC[1] - TC[0]))
-    cleanup = (tc[1] + GAP, tc[1] + GAP + T_OPT)
+    tc, ac = pulse_intervals(_SETTINGS, start, TC_DURATION, AC_DURATION, "read")
+    exchange_end = max(tc[1], ac[1])
+    cleanup = (exchange_end + GAP, exchange_end + GAP + T_OPT)
 
     def flux_read(t):
         return PHI_PARK + (PHI_SWAP - PHI_PARK) * smooth_window(t, *tc) + TOLERANCE_OFFSETS["FLUX"]
@@ -874,8 +875,9 @@ def retrieval_model(source="hyperfine"):
     stages = []
     if unmap:
         stages.append(("Memory to Rydberg", unmap))
-    stages.extend([("Atom to cavity", ac), ("Cavity to transmon", tc),
-                   ("Return atom to h0", cleanup)])
+    stages.extend(sorted([("Atom to cavity", ac), ("Cavity to transmon", tc)],
+                         key=lambda stage: stage[1][0]))
+    stages.append(("Return atom to h0", cleanup))
     points = [np.linspace(0, cleanup[1], 1801)]
     points.extend(np.asarray(interval) for _, interval in stages)
     points.append(np.asarray([sum(tc) / 2, sum(ac) / 2]))
@@ -1391,6 +1393,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             metadata={"noise_enabled": True, "source": source, "roundtrip": roundtrip,
                       "input_theta_degrees": float(np.rad2deg(theta)), "input_phi_degrees": float(np.rad2deg(phi)),
                       "phase_correction_rad": float(phase), "stages_us": dict(stages),
+                      "pulse_delay_ns": derived(_SETTINGS)["read_pulse_delay_ns"],
                       "storage_duration_us": STORAGE,
                       "time_origin": "Retrieval begins at zero AFTER storage; initial state already includes the hold.",
                       "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",

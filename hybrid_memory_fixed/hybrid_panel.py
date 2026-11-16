@@ -36,7 +36,7 @@ configure_tk_libraries()
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
-from hybrid_settings import FIELDS, DEFAULTS, validate, derived
+from hybrid_settings import FIELDS, DEFAULTS, PULSE_DELAY_KEYS, validate, derived
 from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
 from assistant_proposals import parse_proposal, prepare_application
@@ -48,9 +48,6 @@ MODES = [
 ("Both transfer directions", []),
 ("Transmon to atom", ["--write-only"]),
 ("Atom to transmon", ["--retrieve"]),
-("Simultaneous cavity resonance: both directions", ["--simultaneous", "--simultaneous-direction", "both"]),
-("Simultaneous cavity resonance: transmon to atom", ["--simultaneous"]),
-("Simultaneous cavity resonance: atom to transmon", ["--simultaneous", "--simultaneous-direction", "read"]),
 ]
 
 
@@ -61,6 +58,8 @@ PARAMETER_SYMBOLS = {
     "DISSIPATION": r"\mathcal{L}_{\mathrm{additional}}",
     "CONSTANT_FLUX": r"\phi(t)=\phi_{\mathrm{swap}}",
     "CONSTANT_FIELD": r"E(t)=V_{\mathrm{swap}}/\ell+E_{\mathrm{stray}}",
+    "WRITE_PULSE_DELAY_NS": r"\tau_{\mathrm{write}}",
+    "READ_PULSE_DELAY_NS": r"\tau_{\mathrm{read}}",
     "SIM_HOLD_SCALE": r"s_{\mathrm{sim}}",
     "SIM_RAMP": r"T_{\mathrm{ramp,sim}}",
     "FC": r"f_c",
@@ -143,14 +142,16 @@ SECTION_EQUATIONS = {
     "Simultaneous resonance": (
         (
             r"$f_T(\phi_{\mathrm{res}})=f_A(E_{\mathrm{res}})=f_c$",
-            r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{hold}}=s_{\mathrm{sim}}\pi/G$",
+            r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{sim}}=s_{\mathrm{sim}}(2T_{\mathrm{ramp,sim}}+\pi/G)$",
             r"$P_{\max}=4g_{TC}^2g_{AC}^2/(g_{TC}^2+g_{AC}^2)^2$",
         ),
-        "Both controls ramp to cavity resonance, hold, then return to park. "
-        "Set the hold multiplier and ramp duration below. "
+        "Both pulsed controls use the same sin-squared excursion as sequential mode, "
+        "reaching cavity resonance only at the shared midpoint and returning to park. "
+        "The duration is the multiplier times (2 ramp references + the ideal exchange reference). "
         "Constant-control options keep the entered flux or voltage throughout the sequence. "
-        "A multiplier of 1 targets the first ideal transfer maximum; equal coupling magnitudes give full ideal transfer. "
-        "Ramps and losses can shift the optimum. Output includes the storage hold.",
+        "The ideal transfer limit assumes constant resonance; it is not a prediction for rounded pulses. "
+        "Tune the duration multiplier for the rounded waveform. With both controls constant, "
+        "the ramp reference is unused. Output includes the storage hold.",
     ),
     "Cavity and transmon": (
         (
@@ -223,7 +224,12 @@ SECTION_EQUATIONS = {
         "OMEGA and pulse duration are then derived, with light shifts and scattering included. "
         "Times are in μs. Optical envelopes vanish outside "
         "their pulse intervals. Flux and field use a rounded sin-squared pulse with zero endpoint slopes and no flat hold. "
-        "GAP separates operations. Input Bloch angles are entered in degrees. "
+        "GAP separates optical preparation/mapping from the control pulses. "
+        "Write and read pulse delays independently set voltage peak time minus flux peak time, "
+        "in ns: zero aligns centers, "
+        "positive delays voltage, negative advances it. Auto retains sequential ordering "
+        "(flux first for writing, voltage first for reading). Matching widths and resonant peaks "
+        "recover the simultaneous-resonance waveform at zero delay. Input Bloch angles are entered in degrees. "
         "The nominal resonant time is only a reference. Separate TC and AC multipliers stretch each rounded pulse. RAMP contributes to the reference duration before scaling. Finite pulses still have spectral width. Peak controls can cross resonance twice for coherent transfer; changing device inputs requires recalibration.",
     ),
     "Experimental tolerances": (
@@ -405,8 +411,8 @@ class ParameterPanel:
             value.trace_add("write",self.update_swap_rates)
         for key in ("CONSTANT_FLUX", "CONSTANT_FIELD"):
             self.entries[key].trace_add("write",self.update_coupling_mode)
-        self.mode.trace_add("write",self.sync_simultaneous_mode)
-        self.sync_simultaneous_mode()
+        self.mode.trace_add("write",self.update_swap_rates)
+        self.update_coupling_mode()
         self.update_sweep_state()
         self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
@@ -430,49 +436,12 @@ class ParameterPanel:
             entry.grid(row=index,column=1,sticky="ew",pady=5)
             ttk.Label(self.direct_coupling_frame,text="MHz").grid(row=index,column=2,padx=8)
             self.input_widgets[key]=entry
-        self.simultaneous_enabled=tk.BooleanVar(value=False)
-        self.simultaneous_button=ttk.Checkbutton(box,text="Simultaneous resonance",
-            variable=self.simultaneous_enabled,command=self.toggle_simultaneous_resonance)
-        self.simultaneous_button.grid(row=2,column=0,sticky="w",pady=(12,0))
-        self.simultaneous_frame=ttk.LabelFrame(box,text="Simultaneous resonance settings",padding=10)
-        self.simultaneous_frame.grid(row=3,column=0,sticky="ew",pady=(8,0))
-        self.simultaneous_frame.columnconfigure(1,weight=1)
-        for index,(_,key,label,units,default,_) in enumerate(f for f in FIELDS if f[0]=="Simultaneous resonance"):
-            self.entries[key]=tk.StringVar(value=str(default))
-            ttk.Label(self.simultaneous_frame,text=label).grid(row=index,column=0,sticky="w",padx=(0,12),pady=5)
-            entry=ttk.Entry(self.simultaneous_frame,textvariable=self.entries[key],width=16)
-            entry.grid(row=index,column=1,sticky="ew",pady=5)
-            ttk.Label(self.simultaneous_frame,text=units).grid(row=index,column=2,padx=8)
-            self.input_widgets[key]=entry
-        self.simultaneous_frame.grid_remove()
         self.direct_coupling_frame.grid_remove()
         self.entries["DIRECT_COUPLING"].trace_add("write",self.update_coupling_mode)
+        # Preserve legacy CLI-only settings when loading/saving existing files.
+        for _,key,_,_,default,_ in (f for f in FIELDS if f[0]=="Simultaneous resonance"):
+            self.entries[key]=tk.StringVar(value=str(default))
 
-    def toggle_simultaneous_resonance(self):
-        if self.simultaneous_enabled.get():
-            sweeping=self.sweep_enabled.get()=="On"
-            self.sweep_enabled.set("Off")
-            direction = {"Both transfer directions": "both directions", "Transmon to atom": "transmon to atom",
-                         "Atom to transmon": "atom to transmon"}.get(self.mode.get(), "both directions")
-            self.mode.set("Simultaneous cavity resonance: " + direction)
-            self.status.set("Simultaneous resonance is on. Set hold/ramp below; constant-control options are in the transmon and atom tabs."
-                            + (" Parameter sweep was turned off for this output." if sweeping else ""))
-        else:
-            direction = self.mode.get().removeprefix("Simultaneous cavity resonance: ")
-            self.mode.set({"both directions": "Both transfer directions", "atom to transmon": "Atom to transmon"}.get(direction, "Transmon to atom"))
-            self.status.set("Simultaneous resonance is off. Sequential transfer selected.")
-
-    def sync_simultaneous_mode(self,*_):
-        enabled=self.mode.get().startswith("Simultaneous cavity resonance:")
-        self.simultaneous_enabled.set(enabled)
-        if enabled:
-            if self.sweep_enabled.get()=="On":
-                self.sweep_enabled.set("Off")
-            self.simultaneous_frame.grid()
-        else:
-            self.simultaneous_frame.grid_remove()
-        self.update_coupling_mode()
-        self.update_swap_rates()
 
     def update_coupling_mode(self,*_):
         if getattr(self,"_updating_assistant_values",False):
@@ -486,17 +455,10 @@ class ParameterPanel:
             self.input_widgets[key].configure(state="disabled" if manual else "normal")
         constant_flux=self.entries['CONSTANT_FLUX'].get() in ('1','1.0')
         constant_field=self.entries['CONSTANT_FIELD'].get() in ('1','1.0')
-        simultaneous=self.simultaneous_enabled.get()
-        for key in ('PHI_PARK', 'PHI_SWAP', 'E_PARK', 'V_SWAP'):
-            constant=constant_flux if key.startswith('PHI') else constant_field
-            unused=(constant if key in ('PHI_PARK','E_PARK') else simultaneous and not constant)
-            self.input_widgets[key].configure(state='disabled' if unused else 'normal')
-        self.input_widgets['SIM_RAMP'].configure(
-            state='disabled' if constant_flux and constant_field else 'normal')
-        for key in ('TC_PULSE_SCALE','AC_PULSE_SCALE','RAMP'):
-            self.input_widgets[key].configure(state='disabled' if simultaneous else 'normal')
-        group=("Simultaneous resonance" if self.simultaneous_enabled.get() else
-               "Direct coupling" if manual else "Coupling parameters")
+        for key in ('PHI_PARK', 'E_PARK'):
+            constant=constant_flux if key=='PHI_PARK' else constant_field
+            self.input_widgets[key].configure(state='disabled' if constant else 'normal')
+        group="Direct coupling" if manual else "Coupling parameters"
         self.equation_images["Coupling parameters"]=tk.PhotoImage(master=self.root,
             data=base64.b64encode(section_equations_png(group,dpi=self.root.winfo_fpixels("1i"),
                  max_width=int(self.root.winfo_screenwidth()*.42))).decode("ascii"))
@@ -847,7 +809,7 @@ class ParameterPanel:
         self._updating_assistant_values=True
         try:
             for key,value in changes.items():
-                self.entries[key].set(str(value))
+                self.entries[key].set("auto" if key in PULSE_DELAY_KEYS and value is None else str(value))
         except Exception as exc:
             for key,value in previous.items():
                 self.entries[key].set(value)
@@ -895,33 +857,14 @@ class ParameterPanel:
                 f"Constant entered flux: {d['swap_flux']:.6g}.\n"
                 f"Transmon frequency: {d['transmon_interaction_frequency_MHz']:.6g} MHz; detuning: {detuning:+.6g} MHz.\n"
                 "Parked flux is unused; the entered pulse-peak flux stays constant.")
-        if self.simultaneous_enabled.get():
-            try:
-                from simultaneous_coupling import resonance_settings
-                resonance=resonance_settings(config)
-            except ValueError as exc:
-                self.swap_rates.set(str(exc))
-                return
-            self.transmon_tuning.set(
-                f"Cavity: {config['FC']:.6g} MHz.\n"
-                f"Interaction transmon flux: {resonance['interaction_flux']:.6g}.\n"
-                f"Flux: {'constant entered value' if config['CONSTANT_FLUX'] else 'pulsed from park'}.\n"
-                f"Electric field: {'constant entered value' if config['CONSTANT_FIELD'] else 'pulsed from park'}.")
-            self.swap_rates.set(
-                f"{'Manual' if config['DIRECT_COUPLING'] else 'Calculated'} resonant couplings g/(2π): "
-                f"TC {resonance['g_TC_rad_per_us']/(2*math.pi):.5g}; "
-                f"AC {resonance['g_AC_rad_per_us']/(2*math.pi):.5g} MHz.\n"
-                f"Interaction flux {resonance['interaction_flux']:.6g}; voltage {resonance['interaction_voltage_V']:.6g} V.\n"
-                f"Shared hold: {config['SIM_HOLD_SCALE']*resonance['reference_hold_us']:.6g} us; "
-                f"ramp: {0 if config['CONSTANT_FLUX'] and config['CONSTANT_FIELD'] else config['SIM_RAMP']:.6g} us; "
-                f"detunings TC {resonance['transmon_detuning_MHz']:+.6g}, AC {resonance['atom_detuning_MHz']:+.6g} MHz.")
-            return
         self.swap_rates.set(
             f"{'Manual' if config['DIRECT_COUPLING'] else 'Calculated'} couplings g/(2π): TC {d['transmon_coupling_MHz']:.5g}; AC {d['atom_coupling_MHz']:.5g} MHz.\n"
             f"Nominal resonant swap frequencies: TC {d['transmon_swap_frequency_MHz']:.5g} MHz; "
             f"AC {d['atom_swap_frequency_MHz']:.5g} MHz.\n"
             f"Rounded pulse durations: TC {d['transmon_pulse_duration_us']:.5g} us; "
-            f"AC {d['atom_pulse_duration_us']:.5g} us.")
+            f"AC {d['atom_pulse_duration_us']:.5g} us.\n"
+            f"Voltage minus flux peak delay: write {d['write_pulse_delay_ns']:+.5g} ns; "
+            f"read {d['read_pulse_delay_ns']:+.5g} ns.")
 
     def config(self):
         return validate({key:value.get() for key,value in self.entries.items()})
@@ -934,7 +877,7 @@ class ParameterPanel:
         self.sweep_enabled.set("Off")
         self.mode.set("Both transfer directions")
         for key,value in DEFAULTS.items():
-            self.entries[key].set(str(value))
+            self.entries[key].set("auto" if key in PULSE_DELAY_KEYS and value is None else str(value))
         self.status.set("Default model parameters restored.")
 
     def load(self):
@@ -944,7 +887,7 @@ class ParameterPanel:
         try:
             config=validate(json.loads(Path(path).read_text()))
             for key,value in config.items():
-                self.entries[key].set(str(value))
+                self.entries[key].set("auto" if key in PULSE_DELAY_KEYS and value is None else str(value))
             self.status.set("Settings loaded.")
         except Exception as exc:
             messagebox.showerror("Invalid settings",str(exc))
@@ -967,15 +910,6 @@ class ParameterPanel:
             if "--parameter-sweep" in self.simulation_mode_args():
                 points=self.sweep_points()
                 self.status.set(f"Sweep checks passed: {len(points)} points.")
-                return True
-            if "--simultaneous" in dict(MODES)[self.mode.get()]:
-                from simultaneous_coupling import resonance_settings
-                resonance=resonance_settings(config)
-                self.status.set(
-                    f"Simultaneous exchange: flux {resonance['interaction_flux']:.6g}; "
-                    f"voltage {resonance['interaction_voltage_V']:.6g} V; "
-                    f"hold {config['SIM_HOLD_SCALE']*resonance['reference_hold_us']:.6g} us; "
-                    f"detunings TC {resonance['transmon_detuning_MHz']:+.6g}, AC {resonance['atom_detuning_MHz']:+.6g} MHz. Configured tolerances are included.")
                 return True
             self.status.set(
                 f"Model checks passed. Swap detuning TC/AC: "

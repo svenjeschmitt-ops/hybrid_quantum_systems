@@ -12,7 +12,7 @@ import tempfile
 import time
 
 from hybrid_settings import (DEFAULTS, calculated_swap_field, calculated_transmon_frequency,
-                             derived, resonant_flux, resonant_field, validate)
+                             derived, resonant_flux, resonant_field, validate, active_delay_keys)
 from atomic_model import AtomicModel
 from optical_model import optical_settings
 from simulation_output import real_probability
@@ -109,6 +109,13 @@ def physical_search_space(c, mode, vary_cavity=False):
             low, high = low+c['EFIELD_TOL'], high-c['EFIELD_TOL']
             add('V_SWAP', c['GAP_CM']*(low-c['STRAY_FIELD']), c['GAP_CM']*(high-c['STRAY_FIELD']))
         add('AC_PULSE_SCALE', .4, 25., True)
+    if not mode.startswith('Simultaneous cavity resonance:'):
+        timing = derived(c)
+        for key in active_delay_keys(mode):
+            if c[key] is not None:
+                span = max(abs(c[key])*2,
+                           1000*(timing['transmon_pulse_duration_us']+timing['atom_pulse_duration_us']+c['GAP']))
+                add(key, -span, span)
     if not optical_settings(c):
         add('OMEGA', c['OMEGA']*.5, c['OMEGA']*2, True)
     add('GAP', 0., max(.03, c['GAP']*2))
@@ -139,7 +146,9 @@ def search_space(config, mode, vary_cavity=False):
     c = validate(config)
     if mode not in MODES:
         raise ValueError('Unsupported search output mode.')
-    if json.loads(c.get('ATOMIC_SPECTRUM', '{}')) or optical_settings(c):
+    if (json.loads(c.get('ATOMIC_SPECTRUM', '{}')) or optical_settings(c)
+            or (any(c[key] is not None for key in active_delay_keys(mode))
+                and not mode.startswith('Simultaneous cavity resonance:'))):
         return physical_search_space(c, mode, vary_cavity)
     if vary_cavity:
         keys,bounds,current,seeds,_=search_space(c,mode,False)

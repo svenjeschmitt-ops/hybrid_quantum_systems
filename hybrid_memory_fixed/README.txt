@@ -81,7 +81,8 @@ w(t) = sin^2(pi*(t-start)/T) inside each swap interval, zero outside.
 The applied flux is PHI_PARK + (PHI_SWAP-PHI_PARK)*w(t); the total electric
 field is E_PARK + (E_SWAP-E_PARK)*w(t). Stray-field compensation is retained.
 Both controls reach their interaction value at the midpoint and return to park
-with zero endpoint slopes. Readout uses the same shape in the reverse order.
+with zero endpoint slopes. Readout uses the same shapes; timing is controlled
+by the relative pulse delay below.
 Optical pulses retain their existing sin-squared envelopes.
 These finite pulses have a nonzero spectral width, not exactly one frequency.
 Stage durations are T_TC = TC_PULSE_SCALE*(pi/(2*g_TC) + 2*RAMP) and
@@ -326,7 +327,7 @@ Sequential searches jointly explore PHI_SWAP, V_SWAP, TC_PULSE_SCALE and
 AC_PULSE_SCALE. Bounds cover reachable resonance-crossing peaks within 200 MHz
 and pulse multipliers 0.4 to 25. Physics-based transferred-calibration seeds,
 staged Powell searches and a bounded differential-evolution fallback are used,
-with at most 320 screening evaluations. Simultaneous searches vary shared hold,
+with at most 320 screening evaluations. Simultaneous searches vary shared pulse duration,
 optical rate, gap and applicable ramp. Constant entered peak controls are locked.
 Noiseless endpoint populations screen candidates efficiently. The application
 then validates up to three candidates using the full ordinary noisy calculations,
@@ -481,11 +482,46 @@ With zero tolerances, no extra simulations are run and outcome intervals
 collapse to their nominal values; timing cells still show a dash.
 
 
-Simultaneous shared-cavity resonance:
-Choose "Simultaneous cavity resonance: transmon to atom" in the Output menu.
-The Simultaneous resonance controls set the hold multiplier (default 1)
-and sin-squared ramp duration (default 0.0005 us). By default both controls
-ramp from park onto shared cavity resonance, hold, and return to park.
+Relative pulse delay (replaces the panel's Simultaneous resonance checkbox):
+The Pulses and input state tab has two independent fields, in nanoseconds:
+- WRITE_PULSE_DELAY_NS: transmon to atom.
+- READ_PULSE_DELAY_NS: atom to transmon.
+Each is defined as
+    delay = voltage pulse center - flux pulse center.
+0 aligns the centers; positive delays voltage relative to flux; negative
+puts voltage first. The sign convention is the same for write and read.
+Both controls keep their sin-squared shape. Their existing width multipliers
+and entered peak flux/voltage remain independently adjustable. No automatic
+resonance retuning occurs when editing the delay. Zero delay recovers the
+previous simultaneous-resonance waveform when both widths match its shared
+duration and both peak values are set to cavity resonance.
+The first control pulse starts after optical preparation plus GAP; the entire
+pair is shifted to keep both pulses after preparation, including negative
+delays. Optical mapping starts after BOTH pulses have ended plus GAP.
+Thus overlapping, separated, and reversed-order pulses use the same full
+Hamiltonian, dissipation model, plots, and tolerance calculations.
+
+Each field independently accepts auto (the default), preserving calibrated sequential timing: flux then
+voltage for writing, voltage then flux for reading, separated by GAP. Old
+settings files without delay fields retain this behavior. The former shared
+PULSE_DELAY_NS setting is copied to both fields when loading; explicit new
+write/read values take precedence. Numeric delays
+are saved with settings, supported by parameter sweeps and assistant comparisons,
+and reported as actual peak offsets for each direction. This is a timing delay,
+not the optical carrier phase or input quantum-state phase.
+The Output menu selects only the transfer direction; there is no separate
+simultaneous mode or checkbox in the panel. The historical --simultaneous CLI
+and SIM_HOLD_SCALE/SIM_RAMP settings remain available for old scripts only;
+The two delay fields apply to ordinary write/read runs, not that legacy CLI mode.
+
+Legacy simultaneous shared-cavity resonance (CLI only):
+Use --simultaneous and optionally --simultaneous-direction write/read/both.
+The Simultaneous resonance controls set the pulse duration multiplier (default 1)
+and ramp reference (default 0.0005 us). Both controls use aligned sin-squared
+excursions, just like sequential mode, with no flat hold. Each starts and ends
+at park with zero slope and reaches cavity resonance only at the midpoint.
+The shared duration is SIM_HOLD_SCALE*(2*SIM_RAMP+pi/sqrt(g_TC^2+g_AC^2)).
+SIM_RAMP contributes to the duration; it is not a separate rise/fall segment.
 
 Optional constant controls (available for sequential and simultaneous modes):
 - Cavity and transmon: enable Hold flux constant at entered value (CONSTANT_FLUX=1).
@@ -499,7 +535,7 @@ including when detuned from the cavity. No automatic retuning is performed.
 Only the corresponding parking input is disabled; the constant value stays editable.
 Optical carriers follow the actual preparation/mapping field. Couplings use
 the active interaction flux. The nominal field includes stray-field compensation.
-In simultaneous mode a control whose option is off retains its park/hold/ramp
+In simultaneous mode a control whose option is off retains its rounded sin-squared
 waveform; if both options are on, SIM_RAMP is unused and disabled.
 Only controls that remain pulsed in simultaneous mode require reachable cavity resonance.
 Turning options off restores pulsed controls.
@@ -507,15 +543,17 @@ Both cavity couplings remain active throughout. The cavity is explicitly
 simulated; there is no direct transmon-atom exchange term.
 
 The ideal exchange reference time is pi/sqrt(g_TC^2+g_AC^2), with angular
-g in rad/us, starting from |e,0,r0>. The multiplier sets the resonant plateau
-in simultaneous mode. Ramps and exchange during optical pulses and gaps can
-shift the full protocol optimum. Sequential timing retains the existing scales.
+g in rad/us, starting from |e,0,r0>. This is a constant-resonance
+reference, not a guaranteed swap time for rounded pulses. The multiplier
+stretches the entire rounded pulse, including the ramp-reference contribution.
+With both controls constant the ramp reference is omitted. Rounded tuning and
+exchange during optical pulses and gaps can shift the full protocol optimum. Sequential timing retains the existing scales.
 Even at exact resonance, unequal coupling magnitudes limit ideal exchange
 to 4*g_TC^2*g_AC^2/(g_TC^2+g_AC^2)^2; full exchange requires equal magnitudes.
 The reported limit excludes optical preparation/mapping, dissipation and storage.
-Simultaneous resonance supports transmon to atom, atom to transmon, or both
-independent directions in the Output menu. The checkbox preserves the selected
-direction when switching between sequential and simultaneous protocols.
+The legacy CLI supports transmon to atom, atom to transmon, or both independent
+directions. The panel uses the relative-delay control described above instead of
+a protocol checkbox.
 Write starts with a transmon input, maps to the atom, and then applies STORAGE.
 Read starts with an independently prepared atomic input, applies STORAGE first,
 excites both memory arms to Rydberg states, exchanges through the shared cavity,
