@@ -31,7 +31,7 @@ class SweepFigure:
         self.heading = self.figure.suptitle('', fontsize=16, y=.98)
         self.input_label = self.figure.text(.5, .175, '', ha='center', fontsize=10)
         self.footer = self.figure.text(.5, .02, 'Drag the sweep slider or use Previous / Next to select a simulated point.\n'
-                         'Noise and storage included; independent noiseless phase calibration per point. '
+                         'Noise and storage included; no output phase correction. '
                          'Configured tolerance ranges are included when enabled.', ha='center', fontsize=9)
         slider_axis = self.figure.add_axes((.27, .10, .40, .025))
         slider_axis.text(0, 1.6, report['parameter'], transform=slider_axis.transAxes, fontsize=10)

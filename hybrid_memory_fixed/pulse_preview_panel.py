@@ -29,7 +29,7 @@ class PulsePreview:
                      state='readonly', width=7).pack(side='left', padx=5)
         ttk.Button(controls, text='Refresh', command=self.refresh_now).pack(side='right')
         ttk.Label(parent, textvariable=self.timing).grid(row=1, column=0, sticky='w', pady=(4, 0))
-        self.figure = Figure(figsize=(7, 4.4), dpi=100, layout='constrained')
+        self.figure = Figure(figsize=(5, 2.6), dpi=100, layout='constrained')
         self.axes = self.figure.subplots(2, 1, sharex=True)
         self.voltage_axis = self.axes[0].twinx()
         self.canvas = FigureCanvasTkAgg(self.figure, master=parent)

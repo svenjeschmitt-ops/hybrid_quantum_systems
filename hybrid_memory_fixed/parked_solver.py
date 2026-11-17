@@ -21,7 +21,7 @@ class ParkedSolver:
         for label in range(count):
             indices = np.flatnonzero(labels == label)
             matrix = self.generator[indices][:, indices]
-            self.blocks.append((indices, matrix.toarray() if len(indices) <= 64 else matrix))
+            self.blocks.append((indices, matrix.toarray() if len(indices) <= 256 else matrix))
 
     def run(self, initial, times):
         times = np.asarray(times, dtype=float)

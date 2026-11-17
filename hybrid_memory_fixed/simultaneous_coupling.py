@@ -176,17 +176,13 @@ def control_samples(b, times, direction):
 def run(b, save=False, direction="write"):
     """Panel output: populations, controls, joint fidelity and logical inputs."""
     writing = direction == "write"
-    work = progress.transfer_stages(b._SETTINGS)
     title_direction = "transmon to atom" if writing else "atom to transmon"
-    progress.update(0, "Calibrating simultaneous " + title_direction)
-    _, calibration, _ = simulate(b, 1, 1, noisy=False, include_storage=not writing, direction=direction)
-    progress.update(work["calibration"], "Calculating simultaneous dynamics and storage")
-    phase = float(np.angle(calibration[-1].ptrace(2 if writing else 0)[0, 1]))
-    rotation = b.memory_rotation(phase) if writing else b.IT+(np.exp(1j*phase)-1)*b.e.proj()
+    work = progress.transfer_stages(b._SETTINGS)
+    progress.update(work["start"], "Calculating simultaneous dynamics and storage")
     def joint_target(x, y):
         if writing:
-            return qt.tensor(b.g, qt.basis(b.NC, 0), rotation.dag()*(x*b.h0+y*b.h1))
-        return qt.tensor(rotation.dag()*(x*b.g+y*b.e), qt.basis(b.NC, 0), b.h0)
+            return qt.tensor(b.g, qt.basis(b.NC, 0), (x*b.h0+y*b.h1))
+        return qt.tensor((x*b.g+y*b.e), qt.basis(b.NC, 0), b.h0)
     theta, phi = np.deg2rad([b._SETTINGS['INPUT_THETA'], b._SETTINGS['INPUT_PHI']])
     alpha, beta = np.cos(theta/2), np.exp(1j*phi)*np.sin(theta/2)
     h, _, setup, *_ = model(b, direction=direction)
@@ -230,13 +226,13 @@ def run(b, save=False, direction="write"):
 
     with progress.scope(work['basis'], .95, 'Simultaneous '+direction+' tolerance scenarios'):
         bands = tolerance_bands.compute(
-            b, b._SETTINGS, direction, alpha, beta, phase, times,
+            b, b._SETTINGS, direction, alpha, beta, times,
             np.asarray([pops[name] for name in names]), fidelity, fidelity[-1],
             nominal_state=states[-1], nominal_basis=[row['joint_fidelity_final'] for row in basis],
             evaluator=evaluate_errors, control_sampler=lambda grid: control_samples(b, grid, direction),
             before_index=index)
     summary = dict(joint_fidelity_after_mapping=float(fidelity[index]),
-                   joint_fidelity_after_storage=float(fidelity[-1]), calibrated_phase_rad=phase,
+                   joint_fidelity_after_storage=float(fidelity[-1]), phase_correction_applied=False,
                    **{k: v for k, v in info.items() if k != 'stages'})
     progress.update(.95, 'Building simultaneous resonance figure')
     print(f'Simultaneous resonance (nominal): constant flux={info["constant_flux"]}; constant field={info["constant_field"]}.', flush=True)
@@ -386,7 +382,7 @@ def run(b, save=False, direction="write"):
                           input_phi_degrees=b._SETTINGS['INPUT_PHI'],
                           joint_output_labels=(['g,0,h0', 'g,0,h1', 'wrong_rydberg', 'remaining_other'] if writing else ['g,0,h0', 'e,0,h0', 'wrong_rydberg', 'remaining_other']),
                           basis_evaluation=('After writing AND storage; original transmon g/e/+ inputs.' if writing else 'Independent atomic h0/h1/+ inputs; storage BEFORE retrieval.'),
-                          phase_correction_rad=phase, direction=direction,
+                          phase_correction_applied=False, direction=direction,
                           stages_us=info['stages']), summary, traces, basis)
     if save:
         from pathlib import Path

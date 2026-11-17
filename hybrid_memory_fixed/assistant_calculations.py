@@ -111,7 +111,7 @@ def compare_results(proposal, baseline, candidate, vary_cavity=False):
                 objective='Minimum joint fidelity over logical 0, 1 and + inputs across the selected directions; '
                           'minimum sampled tolerance fidelities when bounds are nonzero.',
                 limitation='Two configurations compared, not an optimization or proof for all qubit inputs. '
-                           'Each configuration uses its own single noiseless phase calibration per direction.')
+                           'Outputs are scored without phase calibration or correction.')
 
 
 def run_comparison(proposal, cancelled, project_root, on_progress=None, timeout=1200, vary_cavity=False):

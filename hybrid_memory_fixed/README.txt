@@ -109,16 +109,11 @@ pulse 10 ns. Peak detunings are -53.7114 MHz (TC) and -20.0464 MHz (AC).
 The optical envelopes remain sin-squared; faster optical pulses reduce exposure
 to loss and unwanted exchange while mapping. All loss rates are unchanged.
 
-Independent six-state validation after 5 us storage:
-Input              Noiseless write/read      Noisy write          Noisy read
-0                  99.9897%                  99.6355%             99.6355%
-1                  99.9167%                  99.3258%             99.3258%
-Each of +,-,+i,-i   99.9532%                  99.4642%             99.4639%
-Fidelities are unconditional joint overlaps, with one fixed noiseless phase
-reference per direction shared by all six inputs. The tests check these six
-states in both directions, solver-step convergence, and round trips at multiple
-storage durations. Unscaled rounded pulses with the former coupling values
-gave only 0.145% noiseless excited-state transfer; they were not calibrated.
+Fidelities are unconditional joint overlaps with the intended input encoded
+in the destination qubit. No ideal-|+> phase calibration or output phase
+correction is applied. Deterministic relative-phase errors count as transfer
+errors. Earlier phase-corrected superposition benchmarks no longer describe
+these scores; rerun simulations to obtain current fidelities.
 
 The default output is two independent state-transfer windows:
 transmon to atom and atom to transmon. The write figure summarizes total write
@@ -128,7 +123,7 @@ input is identified by its Bloch angles below the figure. The read figure has
 a matching table of storage hold, readout and combined duration, rounded pulse durations, final joint fidelities for
 the two logical basis inputs and +, selected-input transmon coherence, cavity
 photons, atom reset h0 population, and residual atomic populations. Metrics include
-configured noise; fidelity uses a fixed phase correction without postselection.
+configured noise; fidelity uses no phase correction or postselection.
 For writing, the input is (alpha|g> + beta|e>) tensor |0,h0>, and the
 target is |g,0> tensor (alpha|h0> + beta|h1>).
 For reading, the input is |g,0> tensor (alpha|h0> + beta|h1>), prepared
@@ -136,12 +131,11 @@ independently of writing, then evolved at the parked operating point for
 STORAGE before retrieval. The target is (alpha|g> + beta|e>) tensor |0,h0>.
 All read fidelities, output columns, residual populations and CSV traces include
 this hold, without resetting or renormalizing the stored state. The plotted
-retrieval time starts at zero AFTER the hold. Noiseless phase calibration
-includes the same hold and is shared across inputs. Set STORAGE=0 for readout only.
+retrieval time starts at zero AFTER the hold. No phase correction is applied. Set STORAGE=0 for readout only.
 Fidelity is <target|rho|target>, including the required empty source and
 cavity vacuum. Residual excitation, loss and decoherence count as errors.
-The + target tests coherence as well as population. A single noiseless phase
-calibration for each direction is shared across its three input states.
+The + target tests coherence as well as population, including deterministic
+relative-phase errors. No output phase correction is applied.
 No conditioning on successful transfer or postselection is applied.
 The write summary and output columns include writing followed by STORAGE.
 It separately reports the selected input's fidelity immediately after writing
@@ -163,13 +157,13 @@ state, and probability.
 Each input/output plot includes the two logical basis inputs and the coherent
 equal superposition "+". Olive columns show intended logical outputs; gold
 columns show other outputs. "Other" includes wrong Rydberg, residual excitation,
-and loss. Phase-corrected joint fidelities for all three inputs are printed
+and loss. Uncorrected joint fidelities for all three inputs are printed
 below each figure; populations alone do not establish superposition fidelity.
 Write columns are evaluated after mapping and the STORAGE hold. Round-trip columns use
 the complete state after writing and storage, and are labeled by the ORIGINAL
 TRANSMON input (g/e/+), not an independently prepared memory input.
 Read columns use an independently prepared atomic input after the STORAGE hold. The selected
-superposition's phase-corrected overlap is reported below each figure.
+superposition's uncorrected overlap is reported below each figure.
 
 Requires a Python installation with Tk, plus:
 python -m pip install "qutip>=5,<6" numpy matplotlib
@@ -236,12 +230,14 @@ overrides are rejected explicitly.
 
 Parking applies PHI_PARK and compensates the specified stray field at
 E_PARK; optical carrier phases remain calibrated to the parked energies.
-Swap durations remain nominal pi/(2g) holds, recomputed from the couplings;
-phase calibration corrects a phase only and cannot repair failed transfer.
+Swap reference durations are recomputed from the couplings.
+Output phases are not corrected; phase errors reduce the reported fidelity.
 
 Each parameter tab includes typeset equations describing its implemented
 model and units. The larger panel shows inputs and equations side by side
-without scrollbars, with the initial window sized to the screen. The numerical tab documents the
+without parameter scrolling and with the initial window sized to the screen.
+Run/Stop and settings controls stay visible below the compact parameter tabs.
+Numerics has a separate Parameter sweep subtab. Equations resize to the available width. The numerical tab documents the
 master equation, state-space truncation, and integration-step setting.
 
 Historical plateau-pulse benchmark (does not apply to the rounded pulses):
@@ -257,10 +253,9 @@ are retained. These are illustrative model defaults, not a calibrated device.
 Finite losses and residual coherent errors prevent exactly unit fidelity.
 Restart the panel and choose Reset defaults; loaded older settings retain
 their own parameter values.
-Validation: round-trip return six-state mean joint fidelity over the 41-point 0-10 us storage
-sweep is 0.999408-0.999555 without noise and 0.987787-0.987893 with noise.
-At STORAGE=5 us these are 0.999483 and 0.987841, using one fixed phase
-calibration, the full joint state, and no postselection.
+Round-trip return and atomic storage are scored against uncorrected joint
+targets, using the full state and no postselection. Historical results using
+a calibrated phase correction must be regenerated for comparison.
 
 Detuning diagnostic: inspect the atomic storage curves and the excited-input
 write probability, as well as retrieval from independently prepared atomic h1.
@@ -318,11 +313,9 @@ Tiny imaginary roundoff in fidelity expectations is accepted, while significant
 imaginary components, nonfinite values and out-of-range probabilities are rejected.
 
 Target fidelity search:
-Set Target (%) in the Assistant header and click Search controls. Questions with
-an explicit goal, such as "I want fidelity of at least 80%" or "fidelity is still
-below 80%", also run this local search directly instead of asking the language
-model for another single-parameter guess. Search controls works without a Codex
-request. Cancel answer stops the search worker.
+Write an explicit goal in Your question, such as "Find settings reaching at least
+80% fidelity", then click Ask assistant. The question starts a local multi-parameter
+search directly, without a Codex request. Cancel answer stops the search worker.
 Sequential searches jointly explore PHI_SWAP, V_SWAP, TC_PULSE_SCALE and
 AC_PULSE_SCALE. Bounds cover reachable resonance-crossing peaks within 200 MHz
 and pulse multipliers 0.4 to 25. Physics-based transferred-calibration seeds,
@@ -331,7 +324,7 @@ with at most 320 screening evaluations. Simultaneous searches vary shared pulse 
 optical rate, gap and applicable ramp. Constant entered peak controls are locked.
 Noiseless endpoint populations screen candidates efficiently. The application
 then validates up to three candidates using the full ordinary noisy calculations,
-including the requested storage, phase calibration, logical 0/1/+ inputs and
+including the requested storage, uncorrected logical 0/1/+ fidelities and
 configured tolerance grid. Device inputs, noise, storage, logical input and basis/solver settings remain
 fixed. Cavity frequency may vary when its Assistant checkbox is enabled. Only a fully validated
 minimum fidelity meeting the requested target produces an Apply proposal.
@@ -351,7 +344,7 @@ The comparison uses the same ordinary or simultaneous model, requested direction
 noise, storage, input, basis, solver settings and tolerance bounds as the panel.
 The score is the minimum logical 0/1/+ joint fidelity across requested directions,
 using sampled tolerance minima if bounds are nonzero. Selected-input fidelities
-are also shown. Each configuration has one noiseless phase reference per direction.
+are also shown. No output phase correction is applied.
 Only a score increase above 0.001 percentage points enables a tested Apply proposal.
 A worse or effectively unchanged candidate is reported without an Apply proposal.
 This compares two configurations; it is not an optimizer or a guarantee for every
@@ -446,8 +439,8 @@ The flux relation remains periodic and is not clipped at the nominal 0-0.5
 input range. FT_TOL and FA_TOL add residual transition-frequency shifts on top
 of flux/Stark shifts; avoid double-counting one physical source of error.
 FC_TOL shifts cavity photon energy in the fixed nominal rotating frame.
-Optical carriers, couplings, pulse timings and noiseless phase corrections
-retain their nominal calibration. There is no random sampling or per-point
+Optical carriers, couplings and pulse timings retain their nominal calibration.
+No phase correction is applied. There is no random sampling or per-point
 retuning. Dissipation remains enabled and separate from these static errors.
 
 The chart and console show nominal, best sampled and worst sampled joint
@@ -464,7 +457,7 @@ sampled pointwise min/max ranges. Summary tables have Metric, Nominal and
 With tolerances columns. Outcome metrics have sampled min/max ranges, including
 the three logical-input fidelities, selected-input coherence and residual
 populations. Write end-state metrics include storage; read includes storage
-before retrieval. All input fidelities use the fixed nominal phase reference.
+before retrieval. All input fidelities use uncorrected output states.
 Pulse timings remain fixed, so their tolerance cells show a dash.
 Combined populations are summed within each realization before taking extrema.
 The nominal comparison retains configured loss and dephasing. Basis-output
@@ -572,13 +565,12 @@ Read starts with an independently prepared atomic input, applies STORAGE first,
 excites both memory arms to Rydberg states, exchanges through the shared cavity,
 and returns the atom to h0. Both couplings remain active throughout.
 Fidelity is the unconditional joint overlap with |g,0,atomic target> for write
-or |transmon target,0,h0> for read. One noiseless phase reference per direction
-is shared across all inputs; read calibration includes the storage hold.
+or |transmon target,0,h0> for read. No output phase correction is applied.
 Each direction has its own controls, detuning, dynamics, summary and 3D joint
 output figure. Read trace time starts after storage. Nonzero experimental
 tolerances add sampled shaded ranges and a With tolerances summary column
 in both directions. The same fixed-error grid as sequential transfer is used;
-pulse timings, couplings, optical carriers and phase references remain nominal.
+pulse timings, couplings and optical carriers remain nominal.
 Ranges are sampled extrema, not confidence intervals or guaranteed bounds.
 Assistant numerical reports use write.json and read.json. Optional saved exports
 use hybrid_simultaneous.png/json for write and hybrid_simultaneous_read.png/json
@@ -603,8 +595,7 @@ are validated before starting; the limit is 501 points. Stop calculation
 terminates the sweep and its active solver process on macOS/Linux.
 
 Each point uses a freshly loaded model, including recalculated frequencies,
-couplings and derived pulse durations, and a separate noiseless phase
-calibration. No pulse optimization is performed. Configured experimental tolerances are
+couplings and derived pulse durations. No output phase correction is applied. No pulse optimization is performed. Configured experimental tolerances are
 scanned at each sweep point, holding that point's nominal calibration fixed. The summary
 metric is selected-input unconditional joint fidelity with configured noise.
 Write includes subsequent storage; read uses an independently prepared atomic
@@ -628,7 +619,7 @@ python hybrid_memory_fixed/backend.py --parameter-sweep --sweep-parameter PHI_SW
 Sweep tolerances:
 Nonzero bounds in Experimental tolerances also apply during parameter sweeps.
 Each point tests the Cartesian -bound/zero/+bound grid around its own nominal
-model, using fixed nominal couplings, timing and phase within that point.
+model, using fixed nominal couplings and timing within that point, without phase correction.
 The sweep slider updates shaded flux/detuning/population ranges and the
 With tolerances summary column. 3D output columns remain nominal. These are
 sampled extrema, not guaranteed continuous bounds or statistical confidence
@@ -689,3 +680,39 @@ Physical Hamiltonian: see PHYSICAL_HAMILTONIAN.md and physical_hamiltonian_examp
 ATOMIC_SPECTRUM supplies field-dependent energies/dipoles; OPTICAL_SCHEME supplies
 effective or explicit two-photon dynamics, light shifts and derived scattering.
 Both are opt-in; the example is synthetic and requires state-specific calibration.
+
+Panel model editors
+-------------------
+Use Configure beside the optical scheme, atomic data, additional loss channels,
+or extra Rydberg levels to edit these models with labeled fields and tables.
+Add, edit, and remove table rows, or paste tab-separated rows from a spreadsheet
+in the displayed column order (without headers). Apply checks the complete model
+before updating the panel; Cancel discards changes.
+
+The detailed optical model derives the effective Rabi frequency, shown read-only
+on the panel while enabled. Disable it to return to the manual frequency.
+Atomic tables and laser parameters require measured or calculated physical data;
+the editor does not invent them. Existing JSON settings files still load and save
+through the panel, with no manual JSON editing required.
+
+
+Phase-sensitive assistant search
+-------------------------------
+Explicit numerical fidelity targets are screened against logical 0, 1 and +
+inputs in each requested direction, including noiseless storage. Excited-state
+population alone is insufficient: a phase-flipped superposition must fail.
+For the ordinary quadratic sequential model the search now varies optical
+Rabi frequency and idle time as well as exchange peaks and duration scales.
+A fast isolated two-level calculation supplies pulse seeds only; it never
+certifies fidelity. A carrier-cycle seed for the optical duration helps avoid
+incompatible write/read phases. All proposals still require full noisy model
+validation with the original storage, noise, basis, and tolerance settings.
+No output phase rotation, population renormalization, or omitted unwanted
+Rydberg levels are used to improve the reported scores.
+
+For nonoverlapping sequential pulses, noiseless screening composes exact
+pulse propagators in the invariant zero/one-excitation sectors and reuses
+unchanged pulses during timing searches. Overlapping pulses use the direct
+solver. Standard figure calculations remain the independent full-model
+validation. Parked Lindblad blocks up to dimension 256 use dense exponentials,
+which avoid the measured sparse exponential-action bottleneck at large detuning.

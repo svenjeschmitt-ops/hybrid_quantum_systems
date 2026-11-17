@@ -40,7 +40,7 @@ def final_metrics(b, state, mode, fidelity, before_fidelity, basis):
     return metrics
 
 
-def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
+def compute(b, config, mode, alpha, beta, times, nominal_pops,
             nominal_fidelity, nominal_final, source='hyperfine',
             nominal_state=None, nominal_basis=None, evaluator=None,
             control_sampler=None, before_index=-1):
@@ -75,18 +75,18 @@ def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
             else:
                 if mode == 'write':
                     grid, states = b.simulate(alpha, beta, noisy=True, include_storage=False)
-                    effect = b.atomic_storage_effect(target, phase)
+                    effect = b.atomic_storage_effect(target)
                     fidelity = np.real(b.qt.expect(effect, states))
                     final_state = b.hold_memory(states[-1])
                     final = float(np.real(b.qt.expect(effect, final_state)))
                 else:
                     initial = b.stored_retrieval_initial(alpha, beta, source)
                     grid, states, _, _, _ = b.evolve_read(initial, source=source)
-                    fidelity = np.asarray(b.read_metrics(states, target, phase)[2])
+                    fidelity = np.asarray(b.read_metrics(states, target)[1])
                     final_state = states[-1]
                     final = float(fidelity[-1])
                 with progress.scope(.5, .95, "Tolerance logical inputs"):
-                    _, _, basis = b.basis_probabilities(mode, source=source, phase=phase, storage=(mode == 'write'))
+                    _, _, basis = b.basis_probabilities(mode, source=source, storage=(mode == 'write'))
             if not np.array_equal(grid, times):
                 raise ValueError('Tolerance trajectories must share the nominal time grid.')
             metrics = final_metrics(b, final_state, mode, final, fidelity[before_index], basis)
@@ -111,7 +111,9 @@ def compute(b, config, mode, alpha, beta, phase, times, nominal_pops,
 
 
 def table_rows(rows, bands, mode):
-    """Keep the existing rows; add a dedicated range column to every metric."""
+    """Add a range column only when tolerance bands were computed."""
+    if bands is None:
+        return [list(row) for row in rows]
     spec = [('basis_0', '.2%'), ('basis_1', '.2%'), ('basis_plus', '.2%')]
     if mode == 'write':
         spec += [('before_fidelity', '.2%'), ('final_fidelity', '.2%'),
@@ -129,8 +131,6 @@ def table_rows(rows, bands, mode):
     for index, (label, value) in enumerate(rows):
         if index < 5:
             interval = '—'  # Timing is fixed; no timing uncertainty is modeled.
-        elif bands is None:
-            interval = f'{value}–{value}'
         else:
             key, formatting = spec[index - 5]
             bounds = bands['summary']['metric_ranges'][key]

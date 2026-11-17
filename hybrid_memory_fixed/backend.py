@@ -406,23 +406,6 @@ def simulate(alpha, beta, noisy=True, include_storage=True):
         result = stopping.solve(qt.sesolve, H, psi, ts, options=options)
     return ts, result.states
 
-def calibrated_phase():
-    # A single nominal, noise-free |+> calibration fixes the known
-    # dynamical phase. This same correction is used for ALL inputs.
-    # It does not correct lost population or decoherence.
-    _, states = simulate(1, 1, noisy=False, include_storage=False)
-    rho_a = states[-1].ptrace(2)
-    return float(np.angle(rho_a[0, 1]))
-
-def memory_rotation(phase):
-    # Virtual Z / calibrated phase reference on the memory qubit.
-    return IA + (np.exp(1j * phase) - 1) * h1 * h1.dag()
-
-def overlap(rho_a, target, U):
-    return float(np.real(qt.expect(
-        qt.ket2dm(target), U * rho_a * U.dag()
-    )))
-
 def results_table(ax, headers, rows, widths=None, bbox=(0, 0.20, 1, 0.58), fontsize=11):
     """Render a shared numeric summary without plot axes."""
     ax.set_axis_off()
@@ -440,7 +423,7 @@ def results_table(ax, headers, rows, widths=None, bbox=(0, 0.20, 1, 0.58), fonts
     return table
 
 
-def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None, storage=False):
+def basis_probabilities(mode, roundtrip=False, source="hyperfine", storage=False):
     """Exclusive joint outcomes and coherent fidelity for g/e/+ inputs.
 
     Columns are probabilities of orthogonal joint basis outputs. The separate
@@ -450,10 +433,6 @@ def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None, s
                if mode == "write" else
                [qt.tensor(t, qt.basis(NC, 0), h0) for t in (g, e)])
     labels, rows, fidelities = [], [], []
-    if phase is None:
-        phase = calibrated_phase() if mode == "write" else read_phase(source, roundtrip)
-    u = (qt.tensor(IT, IC, memory_rotation(phase)) if mode == "write" else
-         qt.tensor(IT + (np.exp(1j * phase) - 1) * e * e.dag(), IC, IA))
     cases = (True,) if roundtrip else (False,)
     for stored in cases:
         for index, (alpha, beta) in enumerate(((1, 0), (0, 1), (1/np.sqrt(2), 1/np.sqrt(2)))):
@@ -485,7 +464,7 @@ def basis_probabilities(mode, roundtrip=False, source="hyperfine", phase=None, s
             target = (qt.tensor(g, qt.basis(NC, 0), logical) if mode == "write" else
                       qt.tensor(logical, qt.basis(NC, 0), h0))
             rho = qt.ket2dm(final) if final.isket else final
-            fidelity = float(np.real(qt.expect(qt.ket2dm(target), u * rho * u.dag())))
+            fidelity = float(np.real(qt.expect(qt.ket2dm(target), rho)))
             assert -1e-7 <= fidelity <= 1+1e-7
             labels.append(label)
             rows.append(row)
@@ -532,10 +511,7 @@ def plot_wrong_population(ax, cases, xlabel):
 
 def main(check=False, save=False):
     work=progress.transfer_stages(_SETTINGS)
-    progress.update(0, "Calibrating write phase")
-    phase = calibrated_phase()
-    progress.update(work["calibration"], "Calculating write dynamics")
-    U = memory_rotation(phase)
+    progress.update(work["start"], "Calculating write dynamics")
 
     # Nonzero input phase checks coherent transfer.
     theta = np.deg2rad(parameter("INPUT_THETA", 90.0))
@@ -546,7 +522,7 @@ def main(check=False, save=False):
     ts, states = simulate(alpha, beta, noisy=True, include_storage=False)
     atomic_states = [rho.ptrace(2) for rho in states]
     transfer_target = (alpha * g + beta * e).unit()
-    fidelity = np.real(qt.expect(atomic_storage_effect(transfer_target, phase), states))
+    fidelity = np.real(qt.expect(atomic_storage_effect(transfer_target), states))
     coherence = np.array([2 * abs(rho[0, 1]) for rho in atomic_states])
     pops = np.array([
         np.real(qt.expect(op, states))
@@ -572,7 +548,6 @@ def main(check=False, save=False):
     print(f"Mapping joint transfer fidelity: {fidelity[mapping_index]:.6f}")
     print(f"Final joint transfer fidelity: {fidelity[-1]:.6f}")
     print(f"Final 2|rho_h0,h1|: {coherence[-1]:.6f}")
-    print(f"Calibrated memory phase (rad): {phase:.6f}")
 
     # Structural checks: trace, Hermiticity, and population bounds.
     assert max(abs(rho.tr() - 1) for rho in states) < 1e-6
@@ -581,22 +556,22 @@ def main(check=False, save=False):
     assert states[-1].eigenenergies().min() > -1e-6
     assert np.all((fidelity > -1e-6) & (fidelity < 1 + 1e-6))
     if check:
-        # Reuse the calibrated phase for a distinct |+i> input.
+        # Check the uncorrected output for a distinct |+i> input.
         _, test_states = simulate(1, 1j, noisy=False, include_storage=False)
         test_target = (h0 + 1j * h1).unit()
-        test_f = overlap(test_states[-1].ptrace(2), test_target, U)
-        print(f"Ideal |+i> overlap with same phase correction: {test_f:.6f}")
+        test_f = float(np.real(qt.expect(test_target.proj(), test_states[-1].ptrace(2))))
+        print(f"Ideal |+i> overlap without phase correction: {test_f:.6f}")
         print("Physical-state checks passed.")
         return
 
     progress.update(work["selected"], "Calculating storage")
     held_state = hold_memory(states[-1])
-    held_fidelity = float(np.real(qt.expect(atomic_storage_effect(transfer_target, phase), held_state)))
+    held_fidelity = float(np.real(qt.expect(atomic_storage_effect(transfer_target), held_state)))
     with progress.scope(work["storage"], work["basis"], "Write logical inputs"):
-        labels, probabilities, input_fidelities = basis_probabilities("write", phase=phase, storage=True)
+        labels, probabilities, input_fidelities = basis_probabilities("write", storage=True)
     with progress.scope(work["basis"], .95, "Write tolerance scenarios"):
         bands = tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "write", alpha, beta,
-                                        phase, ts, pops, fidelity, held_fidelity,
+                                        ts, pops, fidelity, held_fidelity,
                                         nominal_state=held_state, nominal_basis=input_fidelities)
     progress.update(.95, "Building write figure")
     summary_row = 2
@@ -667,8 +642,9 @@ def main(check=False, save=False):
     if bands:
         tolerance_bands.draw(bands, control_axis, detuning_axis, population_axis)
     population_legend(population_axis)
-    table = results_table(performance_axis, ["Metric", "Nominal", "With tolerances"],
-                          summary_rows, widths=[.58, .16, .26],
+    table = results_table(performance_axis,
+                          ["Metric", "Nominal", "With tolerances"] if bands else ["Metric", "Nominal"],
+                          summary_rows, widths=[.58, .16, .26] if bands else [.76, .24],
                           bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
     for row in range(1, len(summary_rows) + 1):
         table[row, 0].set_text_props(ha="left")
@@ -699,13 +675,13 @@ def main(check=False, save=False):
                  "atom_r0", "atom_r1", "atom_loss", "atom_wrong_rydberg")
         write_report(_ASSISTANT_OUTPUT, "write", _SETTINGS,
             metadata={"noise_enabled": True, "input_theta_degrees": float(np.rad2deg(theta)),
-                      "input_phi_degrees": float(np.rad2deg(phi)), "phase_correction_rad": float(phase),
+                      "input_phi_degrees": float(np.rad2deg(phi)), "phase_correction_applied": False,
                       "stages_us": dict(preparation=PREP, transmon_cavity=TC, atom_cavity=AC, mapping=MAP),
                       "pulse_delay_ns": 1000*(sum(AC)-sum(TC))/2,
                       "storage_duration_us": STORAGE,
                       "time_origin": "Beginning of writing; dynamics end before the storage hold.",
                       "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",
-                      "fidelity_definition": "Unconditional joint target overlap; fixed noiseless phase; no postselection.",
+                      "fidelity_definition": "Unconditional joint target overlap; no phase correction; no postselection.",
                       "basis_evaluation": "After writing AND storage; inputs are original transmon g/e/+"},
             summary={"tolerance_ranges": bands["summary"] if bands else None,
                      "displayed_metrics": summary_rows, "selected_fidelity_before_storage": float(fidelity[-1]),
@@ -942,50 +918,27 @@ def stored_retrieval_initial(alpha, beta, source="hyperfine", noisy=True):
     return hold_memory(retrieval_initial(alpha, beta, source), noisy=noisy)
 
 
-def read_phase(source="hyperfine", roundtrip=False):
-    # Fixed calibration from a nominal |+> input; never fit to noisy data
-    # or separately to each unknown input state.
-    if roundtrip:
-        _, write_states = simulate(1, 1, noisy=False, include_storage=True)
-        initial = write_states[-1]
-    else:
-        initial = stored_retrieval_initial(1, 1, source, noisy=False)
-    _, states, _, _, _ = evolve_read(initial, noisy=False, source=source)
-    return float(np.angle(states[-1].ptrace(0)[0, 1]))
-
-
-def read_metrics(states, target, phase):
-    # A virtual Z / phase-reference correction, not an extra recovery of
-    # lost amplitude. Report both raw and phase-corrected overlaps.
-    u = IT + (np.exp(1j * phase) - 1) * e * e.dag()
-    raw, corrected, joint, coherence = [], [], [], []
-    u_full = qt.tensor(u, IC, IA)
+def read_metrics(states, target):
+    """Raw transmon overlap, joint target overlap and coherence; no phase rotation."""
+    raw, joint, coherence = [], [], []
     joint_target = qt.tensor(target, qt.basis(NC, 0), h0)
     for state in states:
         rho = qt.ket2dm(state) if state.isket else state
         rho_t = rho.ptrace(0)
-        raw.append(float(np.real(qt.expect(qt.ket2dm(target), rho_t))))
-        corrected.append(float(np.real(qt.expect(
-            qt.ket2dm(target), u * rho_t * u.dag()
-        ))))
-        joint.append(float(np.real(qt.expect(
-            qt.ket2dm(joint_target), u_full * rho * u_full.dag()
-        ))))
+        raw.append(float(np.real(qt.expect(target.proj(), rho_t))))
+        joint.append(float(np.real(qt.expect(joint_target.proj(), rho))))
         coherence.append(2 * abs(rho_t[0, 1]))
-    return tuple(np.asarray(v) for v in (raw, corrected, joint, coherence))
+    return tuple(np.asarray(v) for v in (raw, joint, coherence))
 
 
-def retrieval_effect(target, phase, noisy=True):
-    """Pull a corrected joint target back through the fixed read channel.
+def retrieval_effect(target, noisy=True):
+    """Pull the uncorrected joint target back through the fixed read channel.
 
     Tr[E_read(rho) P] = Tr[rho E_read^dagger(P)]. This avoids repeating
     readout for every storage duration. Effects must not be trace-normalized.
     """
     h_read, times, _, _, _ = retrieval_model("hyperfine")
-    rotation = IT + (np.exp(1j * phase) - 1) * e * e.dag()
-    u = qt.tensor(rotation, IC, IA)
-    projector = qt.ket2dm(qt.tensor(target, qt.basis(NC, 0), h0))
-    effect = u.dag() * projector * u
+    effect = qt.ket2dm(qt.tensor(target, qt.basis(NC, 0), h0))
     adjoint = qt.liouvillian(h_read, read_c_ops("hyperfine") if noisy else []).dag()
     duration = times[-1]
 
@@ -1046,16 +999,14 @@ def direct_transmon_fidelity(elapsed):
     return mean[inverse[1:]].reshape(elapsed.shape)
 
 
-def atomic_storage_effect(target, phase):
-    """Joint write/store target: transmon g, vacuum, input encoded in h0/h1.
+def atomic_storage_effect(target):
+    """Uncorrected joint target: transmon g, vacuum, input encoded in h0/h1.
 
-    Pull back the fixed memory phase correction, without conditioning on
-    successful transfer. Residual transmon/cavity excitation counts as error.
+    No phase rotation or conditioning on successful transfer is applied.
+    Residual transmon/cavity excitation counts as error.
     """
     atom = (target[0, 0] * h0 + target[1, 0] * h1).unit()
-    joint = qt.tensor(g, qt.basis(NC, 0), atom)
-    rotation = qt.tensor(IT, IC, memory_rotation(phase))
-    return rotation.dag() * joint.proj() * rotation
+    return qt.tensor(g, qt.basis(NC, 0), atom).proj()
 
 
 @lru_cache(maxsize=4)
@@ -1064,22 +1015,21 @@ def transfer_fidelity_data(mode, source="hyperfine"):
 
     Each direction starts with an independently prepared source qubit and
     an empty destination. Read inputs undergo STORAGE before readout.
-    One noiseless phase calibration serves all inputs.
+    Outputs are scored directly, without phase calibration or correction.
     The + projector includes coherence, unlike a population-only score.
     """
     if mode not in ("write", "read"):
         raise ValueError("mode must be write or read")
-    phase = calibrated_phase() if mode == "write" else read_phase(source)
     curves = []
     for target in (g, e, (g + e).unit()):
         alpha, beta = target[0, 0], target[1, 0]
         if mode == "write":
             times, states = simulate(alpha, beta, include_storage=False)
-            values = np.real(qt.expect(atomic_storage_effect(target, phase), states))
+            values = np.real(qt.expect(atomic_storage_effect(target), states))
         else:
             initial = stored_retrieval_initial(alpha, beta, source)
             times, states, _, _, _ = evolve_read(initial, source=source)
-            values = read_metrics(states, target, phase)[2]
+            values = read_metrics(states, target)[1]
         curves.append(values)
     data = np.column_stack((times, *curves))
     data.setflags(write=False)
@@ -1113,14 +1063,11 @@ def storage_fidelity_data():
     noisy/ideal, excited-input atomic noisy/ideal. Atomic fidelity is measured
     BEFORE readout, against |g,0> tensor (alpha|h0> + beta|h1>). It includes
     write errors. Round-trip return alone also accepts a transmon bypass.
-    Separate noiseless write/read phase calibrations are fixed across inputs,
-    noise settings and durations. The full parked state is evolved throughout.
+    No phase correction is applied. The full parked state is evolved throughout.
     """
     durations = np.unique(np.r_[np.linspace(0, max(2 * STORAGE, 1.0), 41), STORAGE])
     inputs = (g, e, (g + e).unit(), (g - e).unit(),
               (g + 1j * e).unit(), (g - 1j * e).unit())
-    phase = read_phase("hyperfine", roundtrip=True)
-    write_phase = calibrated_phase()
     curves, atomic_curves, excited_curves = [], [], []
     for noisy in (True, False):
         print(f"Storage fidelity: {'noisy' if noisy else 'ideal'} six-state sweep…",
@@ -1135,11 +1082,11 @@ def storage_fidelity_data():
             _, written = simulate(target[0, 0], target[1, 0], noisy=noisy,
                                   include_storage=False)
             initial = qt.ket2dm(written[-1]) if written[-1].isket else written[-1]
-            effect = retrieval_effect(target, phase, noisy=noisy)
+            effect = retrieval_effect(target, noisy=noisy)
             held = solver.run(initial, durations)
             values.append(np.real(qt.expect(effect, held.states)))
             atomic_values.append(np.real(qt.expect(
-                atomic_storage_effect(target, write_phase), held.states)))
+                atomic_storage_effect(target), held.states)))
         curves.append(np.mean(values, axis=0))
         atomic_curves.append(np.mean(atomic_values, axis=0))
         excited_curves.append(atomic_values[1])
@@ -1176,7 +1123,7 @@ def plot_storage_fidelity(ax, save=False):
     ax.text(.98, .52, f"Write e → g,0,h1 (noise): {data[0, 6]:.3%}\n"
             "Unchanged-transmon bypass: atomic mean = 1/3.\n"
             "Transmon return can be high without transfer.\n"
-            "Fixed phases; no postselection.", transform=ax.transAxes,
+            "No phase correction; no postselection.", transform=ax.transAxes,
             ha="right", va="center", fontsize=7)
     if save:
         output = Path(__file__).with_name("hybrid_storage_fidelity.csv")
@@ -1187,11 +1134,9 @@ def plot_storage_fidelity(ax, save=False):
 
 def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False):
     work=progress.transfer_stages(_SETTINGS)
-    progress.update(0, "Calibrating read phase")
     if roundtrip and source != "hyperfine":
         raise ValueError("Round trip retrieves from hyperfine memory.")
-    phase = read_phase(source, roundtrip)
-    progress.update(work["calibration"], "Calculating storage and read dynamics")
+    progress.update(work["start"], "Calculating storage and read dynamics")
     theta = np.deg2rad(parameter("INPUT_THETA", 90.0))
     phi = np.deg2rad(parameter("INPUT_PHI", 60.0))
     alpha = np.cos(theta / 2)
@@ -1205,11 +1150,11 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         write_ts, write_states = simulate(alpha, beta, noisy=True, include_storage=True)
         initial = write_states[-1]
         atomic_joint = float(np.real(qt.expect(
-            atomic_storage_effect(target, calibrated_phase()), initial)))
+            atomic_storage_effect(target), initial)))
     else:
         initial = stored_retrieval_initial(alpha, beta, source)
     ts, states, stages, flux_read, voltage_read = evolve_read(initial, source=source)
-    raw, corrected, joint, coherence = read_metrics(states, target, phase)
+    raw, joint, coherence = read_metrics(states, target)
 
     for state in states:
         rho = qt.ket2dm(state) if state.isket else state
@@ -1217,7 +1162,7 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     rho_final = qt.ket2dm(states[-1]) if states[-1].isket else states[-1]
     assert (rho_final - rho_final.dag()).norm() < 1e-6
     assert rho_final.eigenenergies().min() > -1e-6
-    assert -1e-6 <= corrected[-1] <= 1 + 1e-6
+    assert -1e-6 <= raw[-1] <= 1 + 1e-6
 
     print("Mode:", "write-store-read round trip" if roundtrip else f"{source} to transmon")
     print(f"Storage hold before retrieval: {STORAGE:g} us")
@@ -1225,41 +1170,37 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         print(f"Atomic storage joint fidelity BEFORE retrieval: {atomic_joint:.6f}")
         print("Transmon return overlaps below include excitation that never entered the memory.")
     print(f"Raw final transmon overlap: {raw[-1]:.6f}")
-    print(f"Calibrated final transmon overlap: {corrected[-1]:.6f}")
     print(f"Joint overlap (target transmon, cavity vacuum, atom h0): {joint[-1]:.6f}")
     print(f"Final mean cavity photons: {qt.expect(n, states[-1]).real:.6e}")
     print(f"Final atomic h0 population: {qt.expect(Ph0, states[-1]).real:.6f}")
-    print(f"Fixed calibrated transmon phase (rad): {phase:.6f}")
     print("Density-matrix checks passed.")
 
     if check:
-        # Test a distinct relative phase with the SAME calibration.
+        # Test the uncorrected output for a distinct relative input phase.
         initial_test = stored_retrieval_initial(1, 1j, source, noisy=False)
         _, test_states, _, _, _ = evolve_read(initial_test, noisy=False, source=source)
         _, refined_states, _, _, _ = evolve_read(
             initial_test, noisy=False, source=source, step=MAX_STEP / 2
         )
-        # This isolated-source test uses isolated-source calibration.
-        test_phase = read_phase(source) if roundtrip else phase
         test_target = (g + 1j * e).unit()
-        value = read_metrics(test_states[-1:], test_target, test_phase)[1][-1]
-        refined = read_metrics(refined_states[-1:], test_target, test_phase)[1][-1]
+        value = read_metrics(test_states[-1:], test_target)[0][-1]
+        refined = read_metrics(refined_states[-1:], test_target)[0][-1]
         assert abs(value - refined) < 2e-5
-        assert value > 0.5, "Retrieval does not preserve this test superposition."
+        assert -1e-6 <= value <= 1 + 1e-6
         print(f"Ideal |+i> retrieval overlap: {value:.6f}")
         print(f"Step refinement overlap change: {abs(value-refined):.3e}")
         print("Phase-sensitive retrieval and step-refinement checks passed.")
 
     # The round trip uses only the complete state after writing and storage.
     cases = [("After writing and storage" if roundtrip else
-              f"Atomic input after {STORAGE:g} µs storage", ts, states, corrected, joint)]
+              f"Atomic input after {STORAGE:g} µs storage", ts, states, raw, joint)]
     with progress.scope(work["storage"], work["basis"], "Read logical inputs"):
-        labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source, phase=phase)
+        labels, probabilities, input_fidelities = basis_probabilities("read", roundtrip, source)
     nominal_pops = np.real([qt.expect(op, states) for op in
                             (Pe, n, Ph0, Ph1, Pr0, Pr1, Plost, Pwrong)])
     with progress.scope(work["basis"], .95, "Read tolerance scenarios"):
         bands = (tolerance_bands.compute(sys.modules[__name__], _SETTINGS, "read", alpha, beta,
-                                         phase, ts, nominal_pops, joint, joint[-1], source,
+                                         ts, nominal_pops, joint, joint[-1], source,
                                          nominal_state=rho_final, nominal_basis=input_fidelities)
                  if not roundtrip else None)
     progress.update(.95, "Building read figure")
@@ -1318,8 +1259,10 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         ]
         summary_rows = tolerance_bands.table_rows(summary_rows, bands, "read")
         performance_axis.set_title("Storage + readout summary")
-        table = results_table(performance_axis, ["Metric", "Nominal", "With tolerances"], summary_rows,
-                              widths=[.58, .16, .26], bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
+        table = results_table(performance_axis,
+                          ["Metric", "Nominal", "With tolerances"] if bands else ["Metric", "Nominal"], summary_rows,
+                              widths=[.58, .16, .26] if bands else [.76, .24],
+                              bbox=(0, 0.04, 1, 0.94), fontsize=7.5)
         for row in range(1, len(summary_rows) + 1):
             table[row, 0].set_text_props(ha="left")
         if save:
@@ -1338,12 +1281,12 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         if not roundtrip:
             basis_axis.set_box_aspect((4, 4, 3), zoom=.98)
             basis_axis.xaxis.labelpad = -5
-    summary_lines = [f"{label}: selected-input overlap = {case_corrected[-1]:.6f}; "
+    summary_lines = [f"{label}: selected-input overlap = {case_raw[-1]:.6f}; "
                      f"joint overlap = {case_joint[-1]:.6f}"
-                     for label, _, _, case_corrected, case_joint in cases]
+                     for label, _, _, case_raw, case_joint in cases]
     if roundtrip:
         summary_lines.insert(0, f"Atomic storage BEFORE retrieval: selected-input joint fidelity = {atomic_joint:.6f}.")
-        summary_lines.append("Fixed phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
+        summary_lines.append("No phase correction; basis columns use joint targets |g,0,h0⟩ / |e,0,h0⟩.")
         summary_lines.append(f"Round-trip return fidelities: input 0={input_fidelities[0]:.4f}, "
                              f"input 1={input_fidelities[1]:.4f}, +={input_fidelities[2]:.4f}.")
         summary_lines.append("Return fidelity includes states that remained in the transmon; see atomic storage curves for transfer.")
@@ -1392,23 +1335,22 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         write_report(_ASSISTANT_OUTPUT, "roundtrip" if roundtrip else "read", _SETTINGS,
             metadata={"noise_enabled": True, "source": source, "roundtrip": roundtrip,
                       "input_theta_degrees": float(np.rad2deg(theta)), "input_phi_degrees": float(np.rad2deg(phi)),
-                      "phase_correction_rad": float(phase), "stages_us": dict(stages),
+                      "phase_correction_applied": False, "stages_us": dict(stages),
                       "pulse_delay_ns": derived(_SETTINGS)["read_pulse_delay_ns"],
                       "storage_duration_us": STORAGE,
                       "time_origin": "Retrieval begins at zero AFTER storage; initial state already includes the hold.",
                       "units": "time us; detuning MHz; flux Phi/Phi0; voltage V; populations/fidelity/coherence dimensionless; cavity is mean photon number",
-                      "fidelity_definition": "Unconditional joint target overlap; fixed noiseless phase; no postselection.",
+                      "fidelity_definition": "Unconditional joint target overlap; no phase correction; no postselection.",
                       "basis_evaluation": "After storage and retrieval; independent atomic inputs unless roundtrip."},
             summary={"tolerance_ranges": bands["summary"] if bands else None,
                      "displayed_metrics": summary_rows if not roundtrip else summary_lines,
                      "selected_joint_fidelity": float(joint[-1]), "selected_raw_transmon_overlap": float(raw[-1]),
-                     "selected_phase_corrected_transmon_overlap": float(corrected[-1]),
                      "selected_transmon_coherence": float(coherence[-1]),
                      "atomic_joint_before_retrieval_if_roundtrip": atomic_joint,
                      "multilevel_dynamics": multilevel_summary(states)},
             traces={**tolerance_bands.report_traces(bands),
                     "selected_input_dynamics": trace(ts, joint_fidelity=joint,
-                        raw_transmon_overlap=raw, phase_corrected_transmon_overlap=corrected,
+                        raw_transmon_overlap=raw,
                         transmon_coherence_2abs_rho_g_e=coherence, **multilevel_metrics(states), **dict(zip(names, output_pops))),
                     "controls": trace(ts, flux_Phi_over_Phi0=[flux_read(t) for t in ts],
                         electrode_voltage_V=[voltage_read(t) for t in ts],
@@ -1420,9 +1362,9 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
     if save:
         fig.savefig(output, dpi=170)
         np.savetxt(output.with_suffix(".csv"),
-                   np.column_stack((ts, raw, corrected, joint, coherence)),
+                   np.column_stack((ts, raw, joint, coherence)),
                    delimiter=",", comments="",
-                   header="retrieval_time_us,raw_transmon_overlap,calibrated_transmon_overlap,joint_overlap,transmon_coherence")
+                   header="retrieval_time_us,raw_transmon_overlap,joint_overlap,transmon_coherence")
         print(f"Saved {output}")
 
 

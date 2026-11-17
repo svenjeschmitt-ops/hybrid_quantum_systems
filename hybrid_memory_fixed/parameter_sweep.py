@@ -75,7 +75,7 @@ def evaluate_point(b, directions):
     # Reuse the ordinary figures' calculations and reports so tables, basis
     # outputs and dynamics have exactly the same definitions as single runs.
     # Each point retains its configured bounds; error scenarios use that
-    # point's fixed nominal phase, couplings and pulse timing.
+    # point's fixed nominal couplings and pulse timing, without phase correction.
     try:
         with tempfile.TemporaryDirectory(prefix='hybrid-sweep-report-') as directory:
             b._ASSISTANT_OUTPUT = directory
@@ -105,7 +105,7 @@ def evaluate_point(b, directions):
                     'final_fidelity': final,
                     'fidelity_range': (summary['tolerance_ranges']['metric_ranges']['final_fidelity']
                                        if summary.get('tolerance_ranges') else {'low': final, 'high': final}),
-                    'phase_correction_rad': payload['metadata']['phase_correction_rad'],
+                    'phase_correction_applied': False,
                     'time_us': dynamics['time_us'], 'joint_fidelity': series['joint_fidelity'],
                     'populations': {name: series[key] for name, key in names.items()},
                     'figure_report': payload,
@@ -135,7 +135,7 @@ def run(backend, config, parameter, start, stop, step, direction='both',
               'metric': 'Selected-input unconditional joint fidelity, with configured noise. '
                         'Write includes subsequent storage; independent read input includes prior storage.',
               'calibration': 'Fresh model per point. Derived couplings and pulse timings are recomputed. '
-                             'A noiseless phase reference is calibrated separately at each point. '
+                             'No phase correction is applied. '
                              "Within each point, tolerance scenarios keep that point's nominal calibration fixed. No pulse optimization.",
               'trace_times': 'Write traces end before storage; final write fidelity is after storage. '
                              'Read trace time starts after storage.',

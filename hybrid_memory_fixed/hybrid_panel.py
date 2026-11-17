@@ -37,11 +37,13 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from hybrid_settings import FIELDS, DEFAULTS, PULSE_DELAY_KEYS, validate, derived
+from model_editors import TITLES as MODEL_TITLES, add_model_control
+from optical_model import optical_peak
 from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
 from assistant_proposals import parse_proposal, prepare_application
 from assistant_calculations import ComparisonCancelled, reference_only, run_comparison, checked_answer
-from assistant_search import requested_target, run_target_search, search_answer, constant_field_requested
+from assistant_search import requested_target, run_target_search, search_answer, constant_field_requested, validate_search_result
 from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
@@ -141,17 +143,11 @@ def parameter_symbol_png(key, dpi=120):
 SECTION_EQUATIONS = {
     "Simultaneous resonance": (
         (
-            r"$f_T(\phi_{\mathrm{res}})=f_A(E_{\mathrm{res}})=f_c$",
-            r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{sim}}=s_{\mathrm{sim}}(2T_{\mathrm{ramp,sim}}+\pi/G)$",
+            r"$\mathrm{pulsed\ targets}:\quad f_T(\phi_{\mathrm{res}})=f_A(E_{\mathrm{res}})=f_c$",
+            r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{sim}}=s_{\mathrm{sim}}(2T_{r,\mathrm{eff}}+\pi/G)$",
             r"$P_{\max}=4g_{TC}^2g_{AC}^2/(g_{TC}^2+g_{AC}^2)^2$",
         ),
-        "Both pulsed controls use the same sin-squared excursion as sequential mode, "
-        "reaching cavity resonance only at the shared midpoint and returning to park. "
-        "The duration is the multiplier times (2 ramp references + the ideal exchange reference). "
-        "Constant-control options keep the entered flux or voltage throughout the sequence. "
-        "The ideal transfer limit assumes constant resonance; it is not a prediction for rounded pulses. "
-        "Tune the duration multiplier for the rounded waveform. With both controls constant, "
-        "the ramp reference is unused. Output includes the storage hold.",
+        'Pulsed controls reach their resonant targets at the shared midpoint and return to park. Constant controls use the entered values and may be detuned. T_r,eff = 0 when both controls are constant; otherwise it is SIM_RAMP. Couplings are reference magnitudes at the interaction point. The ideal P_max assumes constant resonance, one excitation, no loss and only the desired three-state chain; rounded pulses and extra levels change transfer. Storage follows writing and precedes retrieval.',
     ),
     "Cavity and transmon": (
         (
@@ -160,22 +156,18 @@ SECTION_EQUATIONS = {
             r"$f_{T,\mathrm{int}}=f_T(\phi_{\mathrm{swap}}),\qquad f_{T,\mathrm{park}}=f_T(\phi_{\mathrm{park}})$",
             r"$\Delta_{T,\mathrm{int}}=2\pi(f_{T,\mathrm{int}}-f_c),\qquad \mathrm{resonance}:\ f_{T,\mathrm{int}}=f_c$",
             r"$\phi(t)=\phi_{\mathrm{park}}+[\phi_{\mathrm{swap}}-\phi_{\mathrm{park}}]w_{TC}(t)$",
-            r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)N_T-\pi\epsilon_C N_T(N_T-1)$",
+            r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)\hat n_T-\pi\epsilon_C\hat n_T(\hat n_T-1)$",
         ),
-        "Energies divided by h are entered in MHz. d is SQUID junction asymmetry. "
-        "Enable Hold flux constant at entered value to use the entered pulse-peak flux in every stage, whether resonant or detuned; parked flux is then unused. Otherwise, interaction and parked flux inputs use 0 ≤ flux / flux quantum ≤ 0.5. The applied interaction flux sets the calculated transmon frequency independently of f_c. Resonance requires f_T,int = f_c; coupling sets the nominal swap hold. "
-        "w_TC(t) is a sin-squared excursion, zero outside the pulse and one only at its midpoint. The parked flux sets idle detuning to suppress unwanted exchange while coupling remains active.",
+        'Energies divided by h: MHz. d: SQUID asymmetry. n̂_T = b†b is the excitation operator; NT is the retained ladder size. Equations use nominal controls. Hold flux constant uses the entered pulse-peak flux throughout; interpret φ_park = φ_swap in these equations. Otherwise w_TC is a sin² excursion, zero outside its pulse and one at its midpoint. Entered interaction flux sets f_T independently of f_c. Coupling remains active at park. See Tolerances for static errors.',
     ),
     "Coupling parameters": (
         (
             r"$g_{\mathrm{TC}}\approx\frac{2e\beta V_{\mathrm{zpf}}}{\hbar}\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
             r"$g_{\mathrm{AC}}=\frac{|\mathbf{d}_{01}\cdot\mathbf{E}_{\mathrm{zpf}}|}{\hbar}=\frac{|d_{01}|E_{\mathrm{zpf}}|\cos\theta|}{\hbar}$",
-            r"$f_{\mathrm{swap},TC}=2g_{TC}/(2\pi),\qquad f_{\mathrm{swap},AC}=2g_{AC}/(2\pi),\qquad t_{\mathrm{hold}}=1/(2f_{\mathrm{swap}})$",
+            r"$f_{\mathrm{swap},TC}=2g_{TC}/(2\pi),\qquad f_{\mathrm{swap},AC}=2g_{AC}/(2\pi),\qquad t_{\mathrm{ref}}=1/(2f_{\mathrm{swap}})$",
             r"$\beta=\frac{C_g}{C_\Sigma},\qquad n_{01}\approx\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
         ),
-        "C_g is the coupling capacitance; "
-        "C_Σ is total transmon capacitance. The charge matrix element is calculated at the swap point. "
-        "Swap frequencies shown are nominal resonant population oscillation rates; detuning reduces transfer.",
+        'C_g: coupling capacitance; C_Σ: total transmon capacitance. The charge matrix element is evaluated at the interaction flux and held fixed during a run. These formulas apply without manual overrides or dipole tables. A signed dipole table gives g_AC(E) = d_01(E) E_zpf / ℏ, with alignment already included. Timing uses its magnitude at the interaction field. Swap frequencies are ideal single-excitation references; rounded pulses and detuning change transfer.',
     ),
     "Direct coupling": (
         (
@@ -183,50 +175,34 @@ SECTION_EQUATIONS = {
             r"$f_{\mathrm{swap},j}=2g_{j,\mathrm{input}},\qquad t_{\mathrm{ref},j}=1/(4g_{j,\mathrm{input}})$",
             r"$T_j=s_j(2T_{\mathrm{ramp}}+t_{\mathrm{ref},j}),\qquad j\in\{TC,AC\}$",
         ),
-        "Manual inputs are g/(2 pi) in MHz. Both positive coupling magnitudes replace the physical-input formulas. "
-        "The Hamiltonian uses g in rad/us. These values set swap reference times and remain constant during flux "
-        "and voltage pulses, including simultaneous resonance, sweeps and tolerance scenarios. "
-        "Changing coupling does not retune resonance or optimize the pulse multipliers.",
+        'Inputs are g/(2π) in MHz; Hamiltonian couplings are in rad/μs. These equations apply without a dipole table. A supplied atomic dipole table takes precedence: g_AC(E) = d_01(E) E_zpf / ℏ. Timing then uses its magnitude at the interaction field. Other manual couplings remain constant during each run. Changing couplings does not retune sequential controls or optimize pulse multipliers.',
     ),
     "Atom and electrodes": (
         (
-            r"$E(t)=\frac{V(t)}{\ell}+E_{\mathrm{stray}},\qquad f_A(E)=f_{A,0}+(K_{r1}-K_{r0})E^2$",
-            r"$E_{\mathrm{swap}}=\frac{V_{\mathrm{swap}}}{\ell}+E_{\mathrm{stray}},\qquad f_{A,\mathrm{swap}}=f_{A,0}+(K_{r1}-K_{r0})E_{\mathrm{swap}}^2$",
-            r"$V_{\mathrm{park}}=\ell(E_{\mathrm{park}}-E_{\mathrm{stray}}),\qquad \Delta_A(t)=2\pi[f_A(E(t))-f_c]$",
-            r"$\Delta_{w,r0}(E)=2\pi[f_{\mathrm{wrong,split}}+(K_w-K_{r0})E^2],\qquad \Omega_w(t)=\eta\,\Omega(t)$",
+            r"$E(t)=V(t)/\ell+E_{\mathrm{stray}},\quad E_{\mathrm{swap}}=V_{\mathrm{swap}}/\ell+E_{\mathrm{stray}}$",
+            r"$\varepsilon_i(E)=\varepsilon_i(0)+K_iE^2\ \mathrm{or\ supplied\ table},\quad f_A(E)=\varepsilon_{r1}(E)-\varepsilon_{r0}(E)$",
+            r"$V_{\mathrm{park}}=\ell(E_{\mathrm{park}}-E_{\mathrm{stray}}),\quad \Delta_A(t)=2\pi[f_A(E(t))-f_c]$",
+            r"$\Delta_{w,r0}(E)=2\pi[\varepsilon_w(E)-\varepsilon_{r0}(E)],\qquad \Omega_w(t)=\eta\,\Omega(t)$",
         ),
-        "Enable Hold electric field constant at entered voltage to use V_SWAP / electrode separation + stray field in every stage, whether resonant or detuned; parked field is then unused. "
-        "ℓ is electrode separation in cm; E is in V/cm and K is in MHz/(V/cm)². "
-        "η is relative unwanted optical amplitude. ATOMIC_SPECTRUM overrides energies and signed cavity dipoles "
-        "with field tables; scalar Stark formulas describe the default approximation. See PHYSICAL_HAMILTONIAN.md.",
+        'ε_i = energy/h relative to zero-field r0 (MHz). Quadratic defaults: ε_r0(0) = 0, ε_r1(0) = f_A,0, ε_w(0) = f_wrong,split. A supplied table replaces that level’s quadratic formula, with interpolation and no extrapolation. Extra offsets are relative to their branch.\n\nHold field constant uses the entered voltage throughout; interpret E_park = E_swap. ℓ: cm; E: V/cm; K: MHz/(V/cm)², including −α/(2h). w denotes one unwanted level (r0_wrong), with relative optical amplitude η. Equations use nominal controls.',
     ),
     "Loss and coherence": (
         (
-            r"$L_T=\frac{b}{\sqrt{T_{1,T}}},\qquad L_c=\frac{a}{\sqrt{T_{1,c}}},\qquad L_{rj}=\frac{|\mathrm{loss}\rangle\langle r_j|}{\sqrt{\tau_{rj}}}$",
+            r"$L_{T,\downarrow}=\sqrt{(1+\bar n_T)/T_{1,T}}\,b,\quad L_{T,\uparrow}=\sqrt{\bar n_T/T_{1,T}}\,b^\dagger,\quad L_{j\to k}=\sqrt{B_{jk}/\tau_j}\,|k\rangle\langle j|$",
             r"$L_{\phi,T}=\frac{Z_T}{\sqrt{2T_{\phi,T}}},\qquad L_{\phi,R}=\frac{Z_R}{\sqrt{2T_{\phi,R}}},\qquad L_{\phi,H}=\frac{Z_H}{\sqrt{2T_{\phi,H}}}$",
-            r"$Z_T=2b^\dagger b-I,\qquad Z_R=P_{r1}-P_{r0},\qquad Z_H=P_{h1}-P_{h0}$",
+            r"$Z_T=2b^\dagger b-I,\quad Z_R=P_{r1}-P_{r0}+\sum_{j\in\mathrm{extra}}s_jP_j,\quad Z_H=P_{h1}-P_{h0}$",
             r"$\frac{1}{T_{2,T}}=\frac{1}{2T_{1,T}}+\frac{1}{T_{\phi,T}},\qquad Q_c=2\pi f_cT_{1,c}$",
         ),
-        "All lifetimes are in μs; T_phi denotes pure dephasing, not total T2. "
-        "Rydberg decay includes r0, r1, and the unwanted level. "
-        "The T2 relation shown is the zero-temperature logical-qubit limit; cavity T1 is photon-number lifetime. "
-        "DISSIPATION accepts a JSON object for thermal occupation, measured ladder rates, atomic branching, "
-        "white control noise and pulse-dependent optical scattering; see DISSIPATION.md. Empty {} preserves the original channels.",
+        'Times: μs. B_jk: decay fraction (default: all to lost). j includes all modeled Rydberg levels. Extra-level s_j = −1/+1 for lower/upper branch; built-in wrong has zero weight in Z_R. Cavity thermal jumps use b → a, T1,T → T1,c, n̄_T → n̄_c. Explicit transmon ladder rates override the shown thermal-jump formula.\n\nThe T2 relation assumes zero temperature, standard T1 and no added noise or optical drive. Additional noise can add branching, transitions, dephasing, control noise and optical scattering.',
     ),
     "Pulses and input state": (
         (
             r"$\Omega(t)=\Omega_{\max}\sin^2\!\left(\frac{\pi(t-t_0)}{T_{\mathrm{opt}}}\right),\quad \int_{t_0}^{t_0+T_{\mathrm{opt}}}\Omega(t)\,dt=\pi,\quad T_{\mathrm{opt}}=\frac{2\pi}{\Omega_{\max}}$",
             r"$t_{\mathrm{ref},j}=\frac{\pi}{2g_j},\qquad T_j=s_j(2T_{\mathrm{ramp}}+t_{\mathrm{ref},j}),\quad j=TC,AC$",
             r"$w(u)=\sin^2(\pi u/T_{\mathrm{swap}}),\quad 0\leq u\leq T_{\mathrm{swap}};\qquad w=0\ \mathrm{outside}$",
-            r"$|\psi_T\rangle=\cos(\vartheta/2)|g\rangle+e^{i\varphi}\sin(\vartheta/2)|e\rangle,\qquad t_{\mathrm{end}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
+            r"$|\psi_{\mathrm{in}}\rangle=\cos(\vartheta/2)|0_L\rangle+e^{i\varphi}\sin(\vartheta/2)|1_L\rangle,\quad t_{\mathrm{end,write}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
         ),
-        "Times: μs; delays: ns; Bloch angles: degrees.\n\n"
-        "OPTICAL_SCHEME derives optical strength and duration, including light shifts and scattering. "
-        "Flux and field pulses are rounded sin² envelopes; TC/AC multipliers scale their durations, including RAMP. "
-        "GAP separates optical and control pulses.\n\n"
-        "Delay = voltage peak − flux peak: zero aligns peaks; positive delays voltage. "
-        "Auto uses flux first for writing, voltage first for reading.\n\n"
-        "Resonant times are references; changing device inputs requires pulse recalibration.",
+        'Times: μs; delays: ns; angles: degrees. Ω_max is angular frequency. The π area is a reference, not guaranteed transfer. Laser model uses sin envelopes for each microscopic laser; their product follows sin². Its reference peak is |Δ Ω_lower Ω_upper|/[2(Δ² + Γ²/4)] in angular units; Γ is the decay rate.\n\nLogical states: g/e for writing, h0/h1 for retrieval. Storage follows writing and precedes retrieval. GAP separates optical and exchange stages. Delay = voltage peak − flux peak; auto uses flux first for writing, voltage first for reading. Pulse multipliers include RAMP.',
     ),
     "Experimental tolerances": (
         (
@@ -234,21 +210,23 @@ SECTION_EQUATIONS = {
             r"$\phi_{\mathrm{actual}}(t)=\phi_{\mathrm{nominal}}(t)+\delta\phi$",
             r"$E_{\mathrm{actual}}(t)=E_{\mathrm{nominal}}(t)+\delta E$",
             r"$f_{T,\mathrm{actual}}(t)=f_T(\phi_{\mathrm{actual}}(t))+\delta f_T$",
-            r"$f_{A,\mathrm{actual}}(t)=f_{A,0}+(K_{r1}-K_{r0})E_{\mathrm{actual}}^2(t)+\delta f_A$",
+            r"$f_{A,\mathrm{actual}}(t)=f_A(E_{\mathrm{actual}}(t))+\delta f_A,\quad f_{c,\mathrm{actual}}=f_c+\delta f_c$",
         ),
         "Enter absolute ± bounds; 0 disables a tolerance.\n"
         "Transfer plots and sweeps show shaded ranges and a With tolerances column.\n"
-        "Ranges are sampled, not guaranteed limits. Details: README.txt.",
+        "Detunings use actual frequencies: Δ_j = 2π(f_j,actual − f_c,actual). f_A(E) includes energy tables when supplied. "
+        "Offsets are static; nominal pulse timings, optical carriers and coupling calibration stay fixed. "
+        "Tabulated dipoles are evaluated at the actual field. Ranges are sampled, not guaranteed limits. Details: README.txt.",
     ),
     "Numerics": (
         (
-            r"$\dot\rho=-i[H,\rho]+\sum_k\left(L_k\rho L_k^\dagger-\frac{1}{2}\{L_k^\dagger L_k,\rho\}\right)$",
-            r"$i\,\frac{d|\psi\rangle}{dt}=H|\psi\rangle\quad\mathrm{(noiseless)},\qquad \Delta t_{\mathrm{internal}}\leq\Delta t_{\max}=\mathrm{MAX\_STEP}$",
-            r"$D=N_T N_c(6+N_{extra}),\qquad N_T\geq2,\quad N_c\geq3$",
+            r"$\mathcal{H}=H/\hbar,\quad \dot\rho=-i[\mathcal{H},\rho]+\sum_k\left(L_k\rho L_k^\dagger-\frac{1}{2}\{L_k^\dagger L_k,\rho\}\right)$",
+            r"$i\,\frac{d|\psi\rangle}{dt}=\mathcal{H}|\psi\rangle\quad\mathrm{(noiseless)},\qquad \Delta t_{\mathrm{internal}}\leq\Delta t_{\max}=\mathrm{MAX\_STEP}$",
+            r"$D=N_T N_c(6+N_{extra}+N_p),\qquad N_T\geq2,\quad N_c\geq3$",
         ),
-        "NT sets the weakly anharmonic transmon ladder size. Additional atomic levels can be configured "
-        "through settings files; see multilevel_example.json and README.txt. "
-        "Defaults include one illustrative upper neighbor. "
+        "NT sets the weakly anharmonic transmon ladder size. Use Rydberg levels to edit additional atomic levels and cavity links. "
+        "Defaults include one illustrative upper neighbor. N_p = 2 for the explicit laser model, otherwise 0. "
+        "The Hamiltonian ℋ is in rad/μs; collapse rates are in 1/μs. "
         "Compare increasing bases with fixed controls before claiming convergence.",
     ),
 }
@@ -284,6 +262,15 @@ def coupling_equations_png(dpi=120):
     return section_equations_png("Coupling parameters", dpi=dpi)
 
 
+class ParameterTab(ttk.Frame):
+    """Allocate fixed panes so content cannot displace the bottom controls."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.body=ttk.Frame(self)
+        self.body.place(x=0,y=0,relwidth=1,relheight=1)
+
+
+
 class ParameterPanel:
     def __init__(self, root, backend_path=None):
         self.root=root
@@ -310,30 +297,39 @@ class ParameterPanel:
         height=min(1100,int(root.winfo_screenheight()*.90))
         root.geometry(f"{width}x{height}")
         root.minsize(min(width,1100),min(height,700))
-        self.entries={"RYDBERG_MANIFOLD":tk.StringVar(value=str(DEFAULTS["RYDBERG_MANIFOLD"]))}
+        self.entries={}
         self.input_widgets={}
+        self.optical_peak_display=tk.StringVar()
         self.equation_images={}
         self.symbol_images={}
         self.parameter_tabs={}
         outer=ttk.Frame(root,padding=14)
         outer.pack(fill="both",expand=True)
-        ttk.Label(outer,text="Hybrid quantum memory",font=("",18,"bold")).pack(anchor="w")
-        ttk.Label(outer,text="Edit settings to preview pulses. Run simulation for full results.").pack(anchor="w",pady=(3,10))
+        outer.columnconfigure(0,weight=1)
+        outer.rowconfigure(2,weight=1)
+        ttk.Label(outer,text="Hybrid quantum memory",font=("",18,"bold")).grid(row=0,column=0,sticky="w")
+        ttk.Label(outer,text="Edit settings to preview pulses. Run simulation for full results.").grid(
+            row=1,column=0,sticky="w",pady=(3,10))
         self.tabs=ttk.Notebook(outer)
-        self.tabs.pack(fill="both",expand=True)
+        self.tabs.grid(row=2,column=0,sticky="nsew")
         groups=list(dict.fromkeys(row[0] for row in FIELDS if row[0]!="Simultaneous resonance"))
         for group in groups:
-            tab=ttk.Frame(self.tabs)
-            self.tabs.add(tab,text=group)
+            tab=ParameterTab(self.tabs)
+            caption={"Cavity and transmon":"Cavity & transmon", "Coupling parameters":"Couplings",
+                     "Atom and electrodes":"Atom & electrodes", "Loss and coherence":"Loss & coherence",
+                     "Pulses and input state":"Pulses & input", "Experimental tolerances":"Tolerances"}.get(group,group)
+            self.tabs.add(tab,text=caption)
             self.parameter_tabs[group]=tab
-            tab.columnconfigure(0,weight=1)
-            tab.columnconfigure(1,weight=1)
-            tab.rowconfigure(0,weight=1)
-            frame=ttk.Frame(tab,padding=12)
-            frame.grid(row=0,column=0,sticky="new")
+            tab.body.columnconfigure(0,weight=3,uniform="panes")
+            tab.body.columnconfigure(1,weight=2,uniform="panes")
+            tab.body.rowconfigure(0,weight=1)
+            frame=ttk.Frame(tab.body,padding=(8,6))
+            frame.grid(row=0,column=0,sticky="nsew")
+            frame.grid_propagate(False)
             frame.columnconfigure(1,weight=1)
-            equations=ttk.Frame(tab,padding=(12,16,12,12))
-            equations.grid(row=0,column=1,sticky="new")
+            equations=ttk.Frame(tab.body,padding=(8,8))
+            equations.grid(row=0,column=1,sticky="nsew")
+            equations.grid_propagate(False)
             equations.columnconfigure(0,weight=1)
             if group == "Pulses and input state":
                 equations.grid(sticky="nsew")
@@ -346,20 +342,36 @@ class ParameterPanel:
                 self.pulse_preview_tabs.add(reference,text="Equations and notes")
                 equations=reference
                 equations.columnconfigure(0,weight=1)
-            for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ","RYDBERG_MANIFOLD")):
+            if group == "Numerics":
+                equations.rowconfigure(0,weight=1)
+                self.numerics_tabs=ttk.Notebook(equations)
+                self.numerics_tabs.grid(row=0,column=0,sticky="nsew")
+                reference=ttk.Frame(self.numerics_tabs,padding=8)
+                sweep=ttk.Frame(self.numerics_tabs,padding=8)
+                sweep.columnconfigure(0,weight=1)
+                self.numerics_tabs.add(reference,text="Equations and notes")
+                self.numerics_tabs.add(sweep,text="Parameter sweep")
+                self.build_sweep_controls(sweep,0,width)
+                self.sweep_tab=sweep
+                equations=reference
+                equations.columnconfigure(0,weight=1)
+            for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ")):
                 label_cell=ttk.Frame(frame)
-                label_cell.grid(row=row,column=0,sticky="w",padx=(0,12),pady=7)
-                ttk.Label(label_cell,text=PARAMETER_CAPTIONS.get(key,label)).pack(side="left")
+                label_cell.grid(row=row,column=0,sticky="w",padx=(0,8),pady=3)
+                ttk.Label(label_cell,text=PARAMETER_CAPTIONS.get(key,label),wraplength=230,justify="left").pack(side="left")
                 self.symbol_images[key]=tk.PhotoImage(
                     master=root,data=base64.b64encode(
                         parameter_symbol_png(key,dpi=root.winfo_fpixels("1i"))).decode("ascii"))
                 ttk.Label(label_cell,image=self.symbol_images[key]).pack(side="left",padx=(8,0))
                 value=tk.StringVar(value=str(default))
-                entry=(ttk.Checkbutton(frame,variable=value,onvalue="1",offvalue="0")
-                       if rule == "boolean" else ttk.Entry(frame,textvariable=value,width=18))
-                entry.grid(row=row,column=1,sticky="ew",pady=7)
-                ttk.Label(frame,text=units).grid(row=row,column=2,sticky="w",padx=10)
                 self.entries[key]=value
+                if key in MODEL_TITLES:
+                    entry=add_model_control(frame,row,key,value,self.entries,validate)
+                else:
+                    entry=(ttk.Checkbutton(frame,variable=value,onvalue="1",offvalue="0")
+                           if rule == "boolean" else ttk.Entry(frame,textvariable=value,width=14))
+                    entry.grid(row=row,column=1,sticky="ew",pady=3)
+                    ttk.Label(frame,text=units,wraplength=95).grid(row=row,column=2,sticky="w",padx=6)
                 self.input_widgets[key]=entry
             if group == "Cavity and transmon":
                 self.transmon_tuning=tk.StringVar()
@@ -370,24 +382,22 @@ class ParameterPanel:
                 self.swap_rates=tk.StringVar()
                 ttk.Label(frame,textvariable=self.swap_rates,wraplength=int(width*.4)).grid(
                     row=row+2,column=0,columnspan=3,sticky="w",pady=(12,0))
-            if group == "Numerics":
-                self.build_sweep_controls(frame,row+1,width)
             self.equation_images[group]=tk.PhotoImage(
                 master=root,data=base64.b64encode(section_equations_png(
-                    group,dpi=root.winfo_fpixels("1i"),max_width=int(width*.45))).decode("ascii"))
+                    group,dpi=root.winfo_fpixels("1i"),max_width=int(width*.36))).decode("ascii"))
             equation_label=ttk.Label(equations,image=self.equation_images[group])
-            equation_label.grid(row=0,column=0,sticky="w",pady=(0,12))
+            equation_label.grid(row=0,column=0,sticky="w",pady=(0,8))
             note=ttk.Label(equations,text=SECTION_EQUATIONS[group][1],
-                           wraplength=int(width*.43))
+                           wraplength=int(width*.35))
             note.grid(row=1,column=0,sticky="ew")
             if group == "Coupling parameters":
                 self.coupling_equation_label=equation_label
                 self.coupling_note=note
-            equations.bind("<Configure>",lambda event,label=note:
-                           label.configure(wraplength=max(200,event.width-24)))
+            equations.bind("<Configure>",lambda event,g=group,label=equation_label,note=note:
+                           self.resize_reference(g,label,note,event.width))
         self.build_assistant_tab()
         controls=ttk.Frame(outer)
-        controls.pack(fill="x")
+        controls.grid(row=3,column=0,sticky="ew")
         ttk.Label(controls,text="Output:").pack(side="left")
         self.mode=tk.StringVar(value="Both transfer directions")
         self.output_selector=ttk.Combobox(controls,textvariable=self.mode,values=[m[0] for m in MODES],
@@ -396,7 +406,7 @@ class ParameterPanel:
         self.save=tk.BooleanVar(value=False)
         ttk.Checkbutton(controls,text="Also save plots/data",variable=self.save).pack(side="left")
         tools=ttk.Frame(outer)
-        tools.pack(fill="x",pady=8)
+        tools.grid(row=4,column=0,sticky="ew",pady=8)
         ttk.Button(tools,text="Reset defaults",command=self.reset).pack(side="left")
         ttk.Button(tools,text="Load settings",command=self.load).pack(side="left",padx=6)
         ttk.Button(tools,text="Save settings",command=self.save_settings).pack(side="left")
@@ -406,9 +416,11 @@ class ParameterPanel:
         self.stop_button=ttk.Button(tools,text="Stop calculation",command=self.stop,state="disabled")
         self.stop_button.pack(side="right",padx=6)
         self.status=tk.StringVar(value="Ready. Default parameters are illustrative, not an experimentally validated design.")
-        ttk.Label(outer,textvariable=self.status,wraplength=940).pack(anchor="w",pady=4)
+        status_label=ttk.Label(outer,textvariable=self.status,wraplength=940)
+        status_label.grid(row=5,column=0,sticky="ew",pady=4)
+        outer.bind("<Configure>",lambda event: status_label.configure(wraplength=max(200,event.width-28)))
         progress_row=ttk.Frame(outer)
-        progress_row.pack(fill="x",pady=(3,6))
+        progress_row.grid(row=6,column=0,sticky="ew",pady=(3,6))
         self.progress=tk.DoubleVar(value=0)
         self.progress_label=tk.StringVar(value="0%")
         self.progress_bar=ttk.Progressbar(progress_row,mode="determinate",maximum=100,variable=self.progress)
@@ -433,6 +445,20 @@ class ParameterPanel:
         self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.root.after(100,self.poll)
+
+    def resize_reference(self,group,label,note,width):
+        note.configure(wraplength=max(160,width-16))
+        if group == "Coupling parameters" and self.entries.get("DIRECT_COUPLING"):
+            group=("Direct coupling" if self.entries["DIRECT_COUPLING"].get() in ("1","1.0")
+                   else "Coupling parameters")
+        target=max(160,(width-16)//16*16)
+        if getattr(label,"_reference_size",None)==(group,target):
+            return
+        label._reference_size=(group,target)
+        picture=tk.PhotoImage(master=self.root,data=base64.b64encode(section_equations_png(
+            group,dpi=self.root.winfo_fpixels("1i"),max_width=target)).decode("ascii"))
+        label.configure(image=picture)
+        label._reference_image=picture
 
     def build_direct_coupling_controls(self,parent,row,width):
         box=ttk.Frame(parent)
@@ -474,12 +500,67 @@ class ParameterPanel:
         for key in ('PHI_PARK', 'E_PARK'):
             constant=constant_flux if key=='PHI_PARK' else constant_field
             self.input_widgets[key].configure(state='disabled' if constant else 'normal')
+        self.update_model_input_states()
         group="Direct coupling" if manual else "Coupling parameters"
         self.equation_images["Coupling parameters"]=tk.PhotoImage(master=self.root,
             data=base64.b64encode(section_equations_png(group,dpi=self.root.winfo_fpixels("1i"),
                  max_width=int(self.root.winfo_screenwidth()*.42))).decode("ascii"))
-        self.coupling_equation_label.configure(image=self.equation_images["Coupling parameters"])
         self.coupling_note.configure(text=SECTION_EQUATIONS[group][1])
+        self.resize_reference(group,self.coupling_equation_label,self.coupling_note,
+                              self.coupling_note.master.winfo_width())
+
+    def update_model_input_states(self):
+        """Keep all main-panel overrides consistent without changing saved inputs."""
+        self.update_atomic_input_states()
+        try:
+            noise = json.loads(self.entries['DISSIPATION'].get())
+            explicit_rates = bool(noise.get('transmon_down_rates_per_us', []))
+        except (ValueError, TypeError, AttributeError):
+            pass
+        else:
+            self.input_widgets['T1_T'].configure(state='disabled' if explicit_rates else 'normal')
+        try:
+            optics = json.loads(self.entries['OPTICAL_SCHEME'].get())
+            detailed = bool(optics)
+            if detailed:
+                self.optical_peak_display.set(f"{optical_peak({'OPTICAL_SCHEME': optics}):.8g}")
+        except (ValueError, TypeError, KeyError, ZeroDivisionError):
+            return
+        self.input_widgets['OMEGA'].configure(
+            textvariable=self.optical_peak_display if detailed else self.entries['OMEGA'],
+            state='disabled' if detailed else 'normal')
+
+    def update_atomic_input_states(self):
+        """Disable only parameters fully replaced by the current atomic tables."""
+        try:
+            spectrum = json.loads(self.entries['ATOMIC_SPECTRUM'].get())
+            levels = json.loads(self.entries['RYDBERG_MANIFOLD'].get())
+            energies = spectrum.get('energies_MHz', {})
+            dipoles = spectrum.get('dipoles_ea0', {})
+            # F_A_ZERO also supplies the zero-field reference for every upper
+            # extra level that still uses its quadratic energy model.
+            upper_fallback = 'r1' not in energies or any(
+                level['branch'] == 1 and level['label'] not in energies for level in levels)
+            overridden = {
+                'K_R0': 'r0' in energies,
+                'K_R1': 'r1' in energies,
+                'K_WRONG': 'wrong' in energies,
+                'F_WRONG_SPLIT': 'wrong' in energies,
+                'F_A_ZERO': not upper_fallback,
+            }
+            links = {'r1<-r0': 1.}
+            links.update({f"{level['label']}<-{source}": strength
+                          for level in levels for source, strength in level['cavity_from'].items()})
+            physical_dipole_used = any(strength and link not in dipoles
+                                       for link, strength in links.items())
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return
+        for key, disabled in overridden.items():
+            self.input_widgets[key].configure(state='disabled' if disabled else 'normal')
+        manual = self.entries['DIRECT_COUPLING'].get() in ('1', '1.0')
+        for key in ('D_01_EA0', 'DIPOLE_ALIGNMENT'):
+            self.input_widgets[key].configure(
+                state='disabled' if manual or not physical_dipole_used else 'normal')
 
     def build_sweep_controls(self,parent,row,width):
         optional=ttk.LabelFrame(parent,text="Optional",padding=12)
@@ -565,10 +646,6 @@ class ParameterPanel:
         header=ttk.Frame(tab)
         header.grid(row=0,column=0,sticky="ew",pady=(0,6))
         ttk.Label(header,text="Simulation assistant",font=("",14,"bold")).pack(side="left")
-        ttk.Label(header,text="Target (%)").pack(side="left",padx=(18,4))
-        self.fidelity_target=tk.StringVar(value="80")
-        ttk.Entry(header,textvariable=self.fidelity_target,width=6).pack(side="left")
-        ttk.Button(header,text="Search controls",command=self.search_assistant_target).pack(side="left",padx=8)
         ttk.Button(header,text="Details",command=self.show_assistant_details).pack(side="right")
         self.clear_assistant_button=ttk.Button(header,text="Clear chat",command=self.clear_assistant)
         self.clear_assistant_button.pack(side="right",padx=8)
@@ -604,7 +681,7 @@ class ParameterPanel:
 
     def show_assistant_details(self):
         text=("Questions include current settings and the latest run's numerical results. "
-              "The last six exchanges are retained for follow-ups. Clear chat cancels pending assistant work, removes history and suggestions, and excludes old run data until a new simulation is started. Current panel values and saved files are preserved. Suggested values update the panel only after you preview and apply them. Search controls runs a bounded multi-parameter search for the target percentage. Enabled constant-field and constant-flux controls remain exactly fixed across assistant trials. Explicit fidelity targets in a question also start this local search. Test trial values compares individual proposals for other questions. Exact bare-resonance references need only formula calculations. The main simulation is started separately.\n\n"
+              "The last six exchanges are retained for follow-ups. Clear chat cancels pending assistant work, removes history and suggestions, and excludes old run data until a new simulation is started. Current panel values and saved files are preserved. Suggested values update the panel only after you preview and apply them. Write a fidelity target in Your question, for example: Find settings reaching at least 80% fidelity. Enabled constant-field and constant-flux controls remain exactly fixed across assistant trials. Explicit fidelity targets start a bounded local multi-parameter search. Test trial values compares individual proposals for other questions. Exact bare-resonance references need only formula calculations. The main simulation is started separately.\n\n"
               "Codex uses ChatGPT sign-in and your plan's usage limits. Settings, output and relevant project files "
               "are sent to OpenAI. Project access is read-only; API-key billing is disabled.")
         if self.last_run and self.last_run.get("output_directory"):
@@ -651,27 +728,15 @@ class ParameterPanel:
                 self.events.put(("codex_error",str(exc)))
         threading.Thread(target=worker,daemon=True).start()
 
-    def search_assistant_target(self):
-        try:
-            target=float(self.fidelity_target.get())/100
-            if not 0<target<=1:
-                raise ValueError()
-        except ValueError:
-            self.assistant_status.set("Enter a target greater than 0 and at most 100%.")
-            return
-        self.ask_assistant(target=target)
-
-    def ask_assistant(self,target=None):
+    def ask_assistant(self):
         if self.ask_button.instate(["disabled"]):
             return
-        question=(f"Find control settings reaching at least {target:.2%} fidelity." if target is not None
-                  else self.assistant_question.get("1.0","end").strip())
+        question=self.assistant_question.get("1.0","end").strip()
         if not question or len(question)>1000:
             self.assistant_status.set("Enter a question between 1 and 1,000 characters.")
             return
         try:
-            if target is None:
-                target=requested_target(question)
+            target=requested_target(question)
             settings=self.config()
             if target is not None and constant_field_requested(question) and not settings['CONSTANT_FIELD']:
                 self.assistant_status.set("Enable Hold electric field constant at entered value in the atom tab, then search again. Your field settings were not changed.")
@@ -693,7 +758,7 @@ class ParameterPanel:
         if self.assistant_preview is not None:
             self.assistant_preview.destroy()
             self.assistant_preview=None
-        self.assistant_pending={"question":question,"settings":settings,"mode":mode,"vary_cavity":vary_cavity}
+        self.assistant_pending={"question":question,"settings":settings,"mode":mode,"vary_cavity":vary_cavity,"fidelity_target":target}
         self.assistant_request+=1
         request_id=self.assistant_request
         self.assistant_cancel=threading.Event()
@@ -745,6 +810,20 @@ class ParameterPanel:
         if proposal and 'FC' in proposal['changes'] and not captured.get('vary_cavity',False):
             proposal=None
             error="Cavity frequency is fixed for this request. Enable Vary cavity frequency and ask again."
+        if proposal and captured.get('fidelity_target') is not None:
+            try:
+                evidence = captured.get('target_search')
+                if evidence is None:
+                    raise ValueError('No numerical target-search evidence is available.')
+                verified = validate_search_result(evidence, captured['settings'], captured['mode'],
+                                                captured['fidelity_target'], captured.get('vary_cavity', False))
+                if not verified['target_reached']:
+                    raise ValueError('The numerical search did not reach the requested fidelity.')
+                if proposal['changes'] != verified['changes'] or proposal['evidence'] != 'measured simulation result':
+                    raise ValueError('Suggested values do not match the validated target-search result.')
+            except (ValueError, TypeError, KeyError) as exc:
+                proposal = None
+                error = str(exc)
         self.assistant_proposal=proposal
         self.apply_values_button.configure(state="normal" if proposal else "disabled")
         self.assistant_history.append(dict(captured,answer=display,
@@ -853,6 +932,7 @@ class ParameterPanel:
         if getattr(self,"_updating_assistant_values",False):
             return
         self.update_sweep_preview()
+        self.update_model_input_states()
         try:
             config=self.config()
             d=derived(config)

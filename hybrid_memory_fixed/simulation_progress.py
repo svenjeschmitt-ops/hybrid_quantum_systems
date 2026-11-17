@@ -45,9 +45,9 @@ def transfer_stages(config):
     """Reserve work for every extra tolerance trajectory and logical input."""
     axes=('FC_TOL','FT_TOL','FA_TOL','FLUX_TOL','EFIELD_TOL')
     scenarios=3**sum(config.get(key,0)>0 for key in axes)
-    total=6+4*(scenarios-1)
+    total=5+4*(scenarios-1)
     return {name: .95*units/total for name,units in
-            (('calibration',1),('selected',2),('storage',3),('basis',6))}
+            (('start',0),('selected',1),('storage',2),('basis',5))}
 
 
 def child_environment(start, stop):

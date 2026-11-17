@@ -1,4 +1,4 @@
-"""Deterministic, static-error grid scan with a fixed nominal phase reference."""
+"""Deterministic, static-error grid scan without phase correction."""
 from contextlib import contextmanager
 from datetime import datetime
 from itertools import product
@@ -45,7 +45,7 @@ def fixed_offsets(backend, offsets):
         backend.parked_storage_solver.cache_clear()
 
 
-def evaluate(backend, alpha, beta, phases):
+def evaluate(backend, alpha, beta):
     """Selected-input joint overlaps, including storage in both directions.
 
     Readout starts from an independently prepared atomic input, just like the
@@ -55,10 +55,10 @@ def evaluate(backend, alpha, beta, phases):
     target = (alpha * b.g + beta * b.e).unit()
     _, states = b.simulate(alpha, beta, noisy=True, include_storage=False)
     held = b.hold_memory(states[-1], noisy=True)
-    write = float(np.real(b.qt.expect(b.atomic_storage_effect(target, phases[0]), held)))
+    write = float(np.real(b.qt.expect(b.atomic_storage_effect(target), held)))
     initial = b.stored_retrieval_initial(alpha, beta, noisy=True)
     _, states, _, _, _ = b.evolve_read(initial, noisy=True)
-    read = float(b.read_metrics(states[-1:], target, phases[1])[2][-1])
+    read = float(b.read_metrics(states[-1:], target)[1][-1])
     return {"write_fidelity": write, "read_fidelity": read}
 
 
@@ -85,16 +85,11 @@ def run(backend, config, save=False, output_directory=None):
           f"theta={c['INPUT_THETA']:g}, phi={c['INPUT_PHI']:g} degrees.\n"
           "Offsets are constant throughout each run. Best/worst are sampled extrema, "
           "not guaranteed bounds. Ordinary transfer plots also show sampled tolerance bands.", flush=True)
-    with fixed_offsets(b, {axis: 0.0 for axis, _, _ in AXES}):
-        print("Computing fixed nominal phase references...", flush=True)
-        progress.update(0, "Calibrating tolerance scan")
-        phases = (b.calibrated_phase(), b.read_phase())
-        progress.update(.10, "Tolerance scan calibrated")
     results = []
     for index, offsets in enumerate(points):
         print(f"Tolerance point {index + 1}/{len(points)}: {offsets}", flush=True)
         with fixed_offsets(b, offsets):
-            values = evaluate(b, alpha, beta, phases)
+            values = evaluate(b, alpha, beta)
         results.append({"offsets": offsets, **values})
         progress.update(.10+.85*(index+1)/len(points), f"Tolerance scenario {index+1}/{len(points)} complete")
         print(f"  write+storage={values['write_fidelity']:.8f}; "
@@ -110,11 +105,11 @@ def run(backend, config, save=False, output_directory=None):
                   f"at offsets {row['offsets']}", flush=True)
     report = {
         "settings": c, "offset_units": {axis: unit for axis, _, unit in AXES},
-        "phase_corrections_rad": phases, "results": results, "summary": summary,
+        "phase_correction_applied": False, "results": results, "summary": summary,
         "method": "Cartesian grid of -tolerance, zero, +tolerance per nonzero axis.",
         "metric": "Selected-input unconditional joint fidelity with configured loss and storage; independent write/read inputs.",
         "limitation": "Sampled extrema only; interior or off-grid extrema may be missed. Not statistical confidence bounds.",
-        "calibration": "Nominal pulse timing, couplings, optical carriers and phase references; no per-point retuning.",
+        "calibration": "Nominal pulse timing, couplings, optical carriers; no phase correction; no per-point retuning.",
     }
     folder = (Path(output_directory) if output_directory else
               Path(b.__file__).resolve().parent.parent / "output" / "tolerance_runs" /

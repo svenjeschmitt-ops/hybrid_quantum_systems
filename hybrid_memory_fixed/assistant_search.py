@@ -11,8 +11,8 @@ import sys
 import tempfile
 import time
 
-from hybrid_settings import (DEFAULTS, calculated_swap_field, calculated_transmon_frequency,
-                             derived, resonant_flux, resonant_field, validate, active_delay_keys)
+from hybrid_settings import (DEFAULTS, coupling_strengths, calculated_swap_field, calculated_transmon_frequency,
+                             derived, resonant_flux, resonant_field, validate, active_delay_keys, pulse_intervals)
 from atomic_model import AtomicModel
 from optical_model import optical_settings
 from simulation_output import real_probability
@@ -29,16 +29,24 @@ class StageReached(Exception):
 
 
 def requested_target(question):
-    """Explicit percentages only; ordinary resonance questions stay inexpensive."""
-    if not re.search(r'fid\w*', question, re.I) or not re.search(r'\b(?:target|reach|achiev\w*|at\s+least|below|want|improv\w*|adjust|get)\b', question, re.I):
+    """Recognize numeric fidelity goals, including common misspellings and omitted %."""
+    if not re.search(r'fid\w*', question, re.I) or not re.search(r'\b(?:target|reach\w*|achiev\w*|at\s+least|below|want|improv\w*|increas\w*|boost\w*|optimi[sz]\w*|tun\w*|adjust\w*|change\w*|set|get)\b', question, re.I):
         return None
     match = re.search(r'(?:at\s+least|target|reach|achieve|want|below)\D{0,30}?(\d+(?:\.\d+)?)\s*(?:%|percent)', question, re.I)
     if not match:
         matches=list(re.finditer(r'(\d+(?:\.\d+)?)\s*(?:%|percent)',question,re.I))
         match=matches[-1] if matches else None
+    explicit_percent = match is not None
+    if not match:
+        # Accept natural follow-ups such as "at least 80 fidility" without
+        # treating unrelated numeric device parameters as fidelity goals.
+        match = re.search(r'(\d+(?:\.\d+)?)\s+fid\w*\b', question, re.I)
+        if not match:
+            match = re.search(r'\bfid\w*\b.{0,40}?\b(?:at\s+least|to|of|target)\s+(\d+(?:\.\d+)?)\b', question, re.I)
     if not match:
         return None
-    value = float(match.group(1))/100
+    number = float(match.group(1))
+    value = number/100 if explicit_percent or number > 1 else number
     if not 0 < value <= 1:
         raise ValueError('Target fidelity must be greater than 0 and at most 100%.')
     return value
@@ -219,30 +227,30 @@ def search_space(config, mode, vary_cavity=False):
         abound = (max(abound[0],c['F_A_ZERO']-c['FC']+1e-6),abound[1])
     if (not c['CONSTANT_FLUX'] and tbound[0]>=tbound[1]) or (not c['CONSTANT_FIELD'] and abound[0]>=abound[1]):
         raise ValueError('No reachable resonance-crossing interval exists within the search bounds.')
-    keys = ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE']
-    bounds = [tbound,(math.log(.4),math.log(25)),abound,(math.log(.4),math.log(25))]
+    keys = ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE','GAP','OMEGA']
+    bounds = [tbound,(math.log(.4),math.log(25)),abound,(math.log(.4),math.log(25)),(0.,max(.03,c['GAP']*2)),(math.log(c['OMEGA']*.5),math.log(c['OMEGA']*2))]
     def encode(values):
         return np.array([calculated_transmon_frequency(values,values['PHI_SWAP'])-values['FC'],
                          math.log(values['TC_PULSE_SCALE']),
                          values['F_A_ZERO']+stark*calculated_swap_field(values)**2-values['FC'],
-                         math.log(values['AC_PULSE_SCALE'])])
+                         math.log(values['AC_PULSE_SCALE']), values['GAP'], math.log(values['OMEGA'])])
     def decode(x):
         phi = c['PHI_SWAP'] if c['CONSTANT_FLUX'] else resonant_flux(dict(c,FC=c['FC']+float(x[0])))
         field = calculated_swap_field(c) if c['CONSTANT_FIELD'] else math.sqrt((c['FC']+float(x[2])-c['F_A_ZERO'])/stark)
         return validate(dict(c,PHI_SWAP=phi,TC_PULSE_SCALE=math.exp(x[1]),
-                             V_SWAP=c['V_SWAP'] if c['CONSTANT_FIELD'] else c['GAP_CM']*(field-c['STRAY_FIELD']),AC_PULSE_SCALE=math.exp(x[3])))
+                             V_SWAP=c['V_SWAP'] if c['CONSTANT_FIELD'] else c['GAP_CM']*(field-c['STRAY_FIELD']),AC_PULSE_SCALE=math.exp(x[3]),GAP=float(x[4]),OMEGA=math.exp(x[5])))
     def clip(x):
         return np.clip(x,[a for a,b in bounds],[b for a,b in bounds])
     old = derived(DEFAULTS)
     seed = np.array([old['transmon_swap_detuning_MHz'],
         math.log(DEFAULTS['TC_PULSE_SCALE']*math.sqrt(max(.1,abs(park_t)/max(1,abs(old['transmon_park_frequency_MHz']-DEFAULTS['FC']))))),
         old['atom_swap_detuning_MHz'],
-        math.log(DEFAULTS['AC_PULSE_SCALE']*math.sqrt(max(.1,abs(park_a)/150)))])
+        math.log(DEFAULTS['AC_PULSE_SCALE']*math.sqrt(max(.1,abs(park_a)/150))),c['GAP'],math.log(c['OMEGA'])])
     seeds = [clip(seed),clip(encode(c)),clip([old['transmon_swap_detuning_MHz'],math.log(c['TC_PULSE_SCALE']),
-                                           old['atom_swap_detuning_MHz'],math.log(c['AC_PULSE_SCALE'])])]
+                                           old['atom_swap_detuning_MHz'],math.log(c['AC_PULSE_SCALE']),c['GAP'],math.log(c['OMEGA'])])]
     if c['CONSTANT_FIELD'] or c['CONSTANT_FLUX']:
         original_decode=decode
-        positions=[i for i,key in enumerate(keys) if key not in locked_controls(c)]
+        positions=[i for i,key in enumerate(keys) if key not in locked_controls(c) and key not in ('GAP','OMEGA')]
         held=encode(c)
         active_keys=[keys[i] for i in positions]
         active_bounds=[bounds[i] for i in positions]
@@ -259,6 +267,70 @@ def search_space(config, mode, vary_cavity=False):
             return validate(candidate)
         return active_keys,active_bounds,compact(held),active_seeds,decode_active
     return keys,bounds,clip(encode(c)),seeds,decode
+
+
+def population_seed(config):
+    """Find inexpensive two-level pulse seeds; full multilevel evolution verifies them.
+
+    This surrogate is used only to initialize the search, never as fidelity
+    evidence. Midpoint propagators retain the actual rounded control waveform.
+    """
+    import numpy as np
+    from scipy.optimize import differential_evolution
+    c = validate(config)
+    atom = AtomicModel(c)
+    grid = (np.arange(1024)+.5)/1024
+    window = np.sin(np.pi*grid)**2
+    result = dict(c)
+    for subsystem in ('transmon', 'atom'):
+        if subsystem == 'transmon' and c['CONSTANT_FLUX']:
+            continue
+        if subsystem == 'atom' and c['CONSTANT_FIELD']:
+            continue
+        def candidate(x):
+            if subsystem == 'transmon':
+                phi = resonant_flux(dict(c, FC=c['FC']+float(x[0])))
+                values = dict(result, PHI_SWAP=phi)
+                fields = c['PHI_PARK']+(phi-c['PHI_PARK'])*window
+                ej = c['EJ_MAX']*np.sqrt(np.cos(np.pi*fields)**2+c['ASYMMETRY']**2*np.sin(np.pi*fields)**2)
+                delta = np.sqrt(8*c['EC']*ej)-c['EC']-c['FC']
+                rate = coupling_strengths(values)['transmon_coupling_MHz']
+            else:
+                field = np.sqrt((c['FC']+float(x[0])-c['F_A_ZERO'])/(c['K_R1']-c['K_R0']))
+                values = dict(result, V_SWAP=c['GAP_CM']*(field-c['STRAY_FIELD']))
+                fields = c['E_PARK']+(field-c['E_PARK'])*window
+                delta = atom.transition(fields)-c['FC']
+                rate = coupling_strengths(values)['atom_coupling_MHz']
+            scale = float(np.exp(x[1]))
+            duration = scale*(2*c['RAMP']+1/(4*rate))
+            dt = duration/len(grid)
+            g = 2*np.pi*rate
+            z = np.pi*delta
+            omega = np.hypot(g,z)
+            cs, sn = np.cos(omega*dt), -1j*np.sin(omega*dt)/omega
+            a, b = 1.+0j, 0j
+            for co, si, zi in zip(cs, sn, z):
+                a, b = co*a+si*(zi*a+g*b), co*b+si*(g*a-zi*b)
+            key = 'TC_PULSE_SCALE' if subsystem == 'transmon' else 'AC_PULSE_SCALE'
+            values[key] = scale
+            return abs(b)**2, values
+        def objective(x):
+            try:
+                return 1-candidate(x)[0]
+            except ValueError:
+                return 1.
+        fit = differential_evolution(objective, [(-200.,-.05),(math.log(.4),math.log(25.))],
+                                     popsize=8,maxiter=45,tol=1e-6,seed=19,polish=True)
+        _, result = candidate(fit.x)
+    # The reverse optical arm uses the same carrier convention. Seed an
+    # integer relative carrier cycle across the optical pulse so write/read
+    # superpositions can share a high-fidelity phase without output correction.
+    detuning = abs(float(atom.transition(c['E_PARK']))-c['FC'])
+    cycles = max(1, round(detuning/c['OMEGA']))
+    omega = detuning/cycles
+    if c['OMEGA']*.5 <= omega <= c['OMEGA']*2:
+        result['OMEGA'] = omega
+    return validate(result)
 
 
 def load_backend(config, directory):
@@ -278,35 +350,137 @@ def load_backend(config, directory):
         sys.argv=previous
 
 
+_COHERENT_STAGES = {}
+_COHERENT_PULSES = {}
+
+
+def sequential_screen(b, mode, stage, amplitudes=False):
+    """Exact unitary stage composition in the invariant zero/one-excitation space.
+
+    Idle intervals use matrix exponentials. Pulse propagators can be reused
+    while tuning GAP because each optical carrier has a local pulse origin.
+    No atomic levels within these invariant sectors are discarded.
+    """
+    import numpy as np
+    import qutip as qt
+    from scipy.linalg import expm
+    atomic = {name: level[0] for name, level in b._ATOMIC_MODEL.levels.items()}
+    atomic.update(h0=0,h1=1,lost=0,optical_p0=0,optical_p1=1)
+    order = list(b.ATOM_STATES)
+    indices = [((t*b.NC+c)*b.NA+a) for t in range(b.NT) for c in range(b.NC)
+               for a,name in enumerate(order) if t+c+atomic[name] <= 1]
+    data = np.eye(b.NT*b.NC*b.NA)[:,indices]
+    projection = qt.Qobj(data, dims=[[b.NT,b.NC,b.NA],[len(indices)]])
+    settings = {k:v for k,v in b._SETTINGS.items() if k not in ('GAP','WRITE_PULSE_DELAY_NS','READ_PULSE_DELAY_NS')}
+    scores = []
+    logical_amplitudes = {}
+    for direction in (MODES[mode] if stage == 'joint' else ('write',)):
+        if direction == 'write':
+            h = b.H
+            intervals = [b.PREP,b.TC,b.AC,b.MAP]
+        else:
+            h,_,stages,*_ = b.retrieval_model()
+            intervals = [pair for _,pair in stages]
+        key = (json.dumps(settings,sort_keys=True), direction)
+        if key not in _COHERENT_STAGES:
+            reduced = projection.dag()*h*projection
+            options=dict(atol=1e-11,rtol=1e-9,method='dop853',max_step=b.MAX_STEP,nsteps=100000)
+            pulses = []
+            pulse_settings = {k:v for k,v in settings.items() if k not in ('TC_PULSE_SCALE','AC_PULSE_SCALE')}
+            kinds = ('optical0','tc','ac','optical01') if direction == 'write' else ('optical01','ac','tc','optical0')
+            for kind,(start,end) in zip(kinds,intervals):
+                pulse_key = (json.dumps(pulse_settings,sort_keys=True),kind,round(end-start,14))
+                if pulse_key not in _COHERENT_PULSES:
+                    if len(_COHERENT_PULSES) >= 64:
+                        _COHERENT_PULSES.pop(next(iter(_COHERENT_PULSES)))
+                    _COHERENT_PULSES[pulse_key] = qt.propagator(reduced,[start,end],options=options)[-1].full()
+                pulses.append(_COHERENT_PULSES[pulse_key])
+            parked = reduced(intervals[-1][1]).full()
+            if len(_COHERENT_STAGES) >= 16:
+                _COHERENT_STAGES.pop(next(iter(_COHERENT_STAGES)))
+            _COHERENT_STAGES[key] = pulses,parked
+        pulses, parked = _COHERENT_STAGES[key]
+        if direction == 'write':
+            initial = qt.tensor((b.g+b.e).unit() if stage=='joint' else b.e,
+                                qt.basis(b.NC,0),b.h0)
+        else:
+            initial = b.retrieval_initial(1,1)
+        state = (projection.dag()*initial).full().ravel()
+        if direction == 'read':
+            state = expm(-1j*parked*b.STORAGE)@state
+        for index,pulse in enumerate(pulses):
+            state = pulse@state
+            if stage == 'tc' and index == 1:
+                break
+            if index < len(pulses)-1:
+                idle_time = intervals[index+1][0]-intervals[index][1]
+                state = expm(-1j*parked*idle_time)@state
+        if stage != 'joint':
+            target = qt.tensor(b.g,qt.basis(b.NC,1),b.r0) if stage=='tc' else qt.tensor(b.g,qt.basis(b.NC,0),b.h1)
+            scores.append(abs(np.vdot((projection.dag()*target).full().ravel(),state))**2)
+            continue
+        if direction == 'write':
+            state = expm(-1j*parked*b.STORAGE)@state
+        zero = qt.tensor(b.g,qt.basis(b.NC,0),b.h0)
+        one = qt.tensor(b.g,qt.basis(b.NC,0),b.h1) if direction=='write' else qt.tensor(b.e,qt.basis(b.NC,0),b.h0)
+        a0 = np.sqrt(2)*np.vdot((projection.dag()*zero).full().ravel(),state)
+        a1 = np.sqrt(2)*np.vdot((projection.dag()*one).full().ravel(),state)
+        logical_amplitudes[direction] = (a0,a1)
+        scores.extend([abs(a0)**2,abs(a1)**2,abs(a0+a1)**2/4])
+    return logical_amplitudes if amplitudes else float(min(scores))
+
+
 def screen(b, mode, stage='joint'):
     """Noiseless endpoint screening only; never used as final target evidence."""
     import numpy as np
     import qutip as qt
     options=dict(store_states=True,atol=1e-11,rtol=1e-9,method='dop853',max_step=b.MAX_STEP,nsteps=100000)
+    if not mode.startswith('Simultaneous cavity resonance:'):
+        read_tc,read_ac=pulse_intervals(b._SETTINGS,b.T_OPT+b.GAP,b.TC_DURATION,b.AC_DURATION,'read')
+        separated = all(b.TC[1] <= b.AC[0]+1e-12 if direction=='write' else read_ac[1] <= read_tc[0]+1e-12
+                        for direction in MODES[mode])
+        if separated:
+            return sequential_screen(b, mode, stage)
     if mode.startswith('Simultaneous cavity resonance:'):
         from simultaneous_coupling import model
         scores=[]
         for direction in MODES[mode]:
             h,_,info,*_=model(b,False,direction)
             times=np.unique([0.,*[x for pair in info['stages'].values() for x in pair]])
-            initial=qt.tensor(b.e,qt.basis(b.NC,0),b.h0) if direction=='write' else b.retrieval_initial(0,1)
-            target=qt.tensor(b.g,qt.basis(b.NC,0),b.h1) if direction=='write' else qt.tensor(b.e,qt.basis(b.NC,0),b.h0)
+            initial=qt.tensor((b.g+b.e).unit(),qt.basis(b.NC,0),b.h0) if direction=='write' else b.retrieval_initial(1,1)
+            if direction=='read':
+                initial=(-1j*h(0)*b.STORAGE).expm()*initial
             final=qt.sesolve(h,initial,times,options=options).states[-1]
-            scores.append(real_probability(qt.expect(target.proj(),final)))
+            if direction=='write':
+                final=(-1j*h(times[-1])*b.STORAGE).expm()*final
+            zero=qt.tensor(b.g,qt.basis(b.NC,0),b.h0)
+            one=qt.tensor(b.g,qt.basis(b.NC,0),b.h1) if direction=='write' else qt.tensor(b.e,qt.basis(b.NC,0),b.h0)
+            a0,a1=np.sqrt(2)*zero.overlap(final),np.sqrt(2)*one.overlap(final)
+            scores.extend([abs(a0)**2,abs(a1)**2,abs(a0+a1)**2/4])
         return min(scores)
     scores=[]
     if stage in ('tc','ac') or 'write' in MODES[mode]:
         end=b.TC[1] if stage=='tc' else b.MAP[1]
         times=np.unique([0.,*[x for pair in (b.PREP,b.TC,b.AC,b.MAP) for x in pair if x<=end]])
-        initial=qt.tensor(b.e,qt.basis(b.NC,0),b.h0)
+        initial=qt.tensor((b.g+b.e).unit() if stage=='joint' else b.e,qt.basis(b.NC,0),b.h0)
         final=qt.sesolve(b.H,initial,times,options=options).states[-1]
         target=qt.tensor(b.g,qt.basis(b.NC,1),b.r0) if stage=='tc' else qt.tensor(b.g,qt.basis(b.NC,0),b.h1)
-        scores.append(real_probability(qt.expect(target.proj(),final)))
+        if stage == 'joint':
+            final = (-1j*b.H(b.MAP[1])*b.STORAGE).expm()*final
+            zero = qt.tensor(b.g,qt.basis(b.NC,0),b.h0)
+            a0, a1 = np.sqrt(2)*zero.overlap(final), np.sqrt(2)*target.overlap(final)
+            scores.extend([abs(a0)**2, abs(a1)**2, abs(a0+a1)**2/4])
+        else:
+            scores.append(real_probability(qt.expect(target.proj(),final)))
     if stage=='joint' and 'read' in MODES[mode]:
         h,_,stages,*_=b.retrieval_model()
         times=np.unique([0.,*[x for _,pair in stages for x in pair]])
-        final=qt.sesolve(h,b.retrieval_initial(0,1),times,options=options).states[-1]
-        scores.append(real_probability(qt.expect(qt.tensor(b.e,qt.basis(b.NC,0),b.h0).proj(),final)))
+        initial=b.hold_memory(b.retrieval_initial(1,1),noisy=False)
+        final=qt.sesolve(h,initial,times,options=options).states[-1]
+        zero=qt.tensor(b.g,qt.basis(b.NC,0),b.h0)
+        one=qt.tensor(b.e,qt.basis(b.NC,0),b.h0)
+        a0, a1 = np.sqrt(2)*zero.overlap(final), np.sqrt(2)*one.overlap(final)
+        scores.extend([abs(a0)**2, abs(a1)**2, abs(a0+a1)**2/4])
     return min(scores)
 
 
@@ -314,6 +488,15 @@ def optimize_controls(config, mode, target, directory, max_evaluations=320, eval
     import numpy as np
     from scipy.optimize import minimize, differential_evolution
     keys,bounds,current,seeds,decode=search_space(config,mode,vary_cavity)
+    offset = int(keys[0] == 'FC')
+    seeded = keys[offset:offset+4] == ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE'] and len(keys) == offset+6
+    if seeded:
+        seed = population_seed(config)
+        coordinates = [calculated_transmon_frequency(seed,seed['PHI_SWAP'])-seed['FC'],
+                       math.log(seed['TC_PULSE_SCALE']),
+                       float(AtomicModel(seed).transition(calculated_swap_field(seed)))-seed['FC'],
+                       math.log(seed['AC_PULSE_SCALE']), seed['GAP'], math.log(seed['OMEGA'])]
+        seeds.insert(0, np.array(([seed['FC']] if offset else [])+coordinates))
     cache,trace,candidates={},[],[]
     best_score,best_x=-1.,current.copy()
     def update(stage):
@@ -365,15 +548,22 @@ def optimize_controls(config, mode, target, directory, max_evaluations=320, eval
         return best[1]
     goal=min(.9995,target+.12)
     try:
-        for seed in seeds:
+        for seed in (seeds[:1] if seeded else seeds):
             evaluate(seed,'joint')
-        if not mode.startswith('Simultaneous cavity resonance:') and keys==['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE'] and best_score<goal:
+        if not mode.startswith('Simultaneous cavity resonance:') and keys[:4]==['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE'] and best_score<goal:
             seed=seeds[0]
             tc=local(seed,[0,1],'tc',.985,80)
             ac=local(tc,[2,3],'ac',max(.95,goal),90)
             evaluate(ac,'joint')
+            if 'GAP' in keys:
+                index=keys.index('GAP')
+                rate=abs(calculated_transmon_frequency(config,config['PHI_PARK'])-config['FC'])+abs(float(AtomicModel(config).transition(config['E_PARK']))-config['FC'])
+                period=1/max(1.,rate)
+                for gap in np.linspace(max(0.,config['GAP']-period),config['GAP']+period,33):
+                    trial=ac.copy();trial[index]=np.clip(gap,*bounds[index])
+                    evaluate(trial,'joint')
             if best_score<goal:
-                other=local(best_x.copy(),[0,1,2,3],'joint',goal,100)
+                other=local(best_x.copy(),list(range(len(keys))),'joint',goal,100)
                 evaluate(other,'joint')
         elif best_score<goal:
             local(best_x.copy(),list(range(len(keys))),'joint',goal,110)
