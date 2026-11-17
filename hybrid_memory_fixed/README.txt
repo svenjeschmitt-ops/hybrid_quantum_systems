@@ -482,6 +482,19 @@ With zero tolerances, no extra simulations are run and outcome intervals
 collapse to their nominal values; timing cells still show a dash.
 
 
+Interactive pulse preview:
+The Pulses and input state tab has a Live preview beside the parameter fields.
+The Equations and notes subtab retains the model reference. Choose Write or Read;
+selecting one direction in the main Output selector also selects it in the preview.
+Control pulses and detunings update as parameters change. Set timing with the
+write/read pulse-delay fields; there is no separate delay slider in the preview.
+Pulse overlap and actual peak-to-peak delay are displayed in ns.
+Drag the time cursor or click a plot to inspect flux, voltage, and detunings.
+The preview contains only control and detuning plots; it does not run a background
+population simulation. The plot toolbar supports zoom and export. The preview timeline ends after
+optical mapping and excludes the storage hold. Use Run simulation for populations, loss,
+coherence, calibrated fidelity and the full tolerance analysis.
+
 Relative pulse delay (replaces the panel's Simultaneous resonance checkbox):
 The Pulses and input state tab has two independent fields, in nanoseconds:
 - WRITE_PULSE_DELAY_NS: transmon to atom.

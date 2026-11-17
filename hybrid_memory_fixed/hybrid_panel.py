@@ -220,17 +220,13 @@ SECTION_EQUATIONS = {
             r"$w(u)=\sin^2(\pi u/T_{\mathrm{swap}}),\quad 0\leq u\leq T_{\mathrm{swap}};\qquad w=0\ \mathrm{outside}$",
             r"$|\psi_T\rangle=\cos(\vartheta/2)|g\rangle+e^{i\varphi}\sin(\vartheta/2)|e\rangle,\qquad t_{\mathrm{end}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
         ),
-        "OPTICAL_SCHEME supplies physical two-photon parameters in effective or explicit mode; "
-        "OMEGA and pulse duration are then derived, with light shifts and scattering included. "
-        "Times are in μs. Optical envelopes vanish outside "
-        "their pulse intervals. Flux and field use a rounded sin-squared pulse with zero endpoint slopes and no flat hold. "
-        "GAP separates optical preparation/mapping from the control pulses. "
-        "Write and read pulse delays independently set voltage peak time minus flux peak time, "
-        "in ns: zero aligns centers, "
-        "positive delays voltage, negative advances it. Auto retains sequential ordering "
-        "(flux first for writing, voltage first for reading). Matching widths and resonant peaks "
-        "recover the simultaneous-resonance waveform at zero delay. Input Bloch angles are entered in degrees. "
-        "The nominal resonant time is only a reference. Separate TC and AC multipliers stretch each rounded pulse. RAMP contributes to the reference duration before scaling. Finite pulses still have spectral width. Peak controls can cross resonance twice for coherent transfer; changing device inputs requires recalibration.",
+        "Times: μs; delays: ns; Bloch angles: degrees.\n\n"
+        "OPTICAL_SCHEME derives optical strength and duration, including light shifts and scattering. "
+        "Flux and field pulses are rounded sin² envelopes; TC/AC multipliers scale their durations, including RAMP. "
+        "GAP separates optical and control pulses.\n\n"
+        "Delay = voltage peak − flux peak: zero aligns peaks; positive delays voltage. "
+        "Auto uses flux first for writing, voltage first for reading.\n\n"
+        "Resonant times are references; changing device inputs requires pulse recalibration.",
     ),
     "Experimental tolerances": (
         (
@@ -322,7 +318,7 @@ class ParameterPanel:
         outer=ttk.Frame(root,padding=14)
         outer.pack(fill="both",expand=True)
         ttk.Label(outer,text="Hybrid quantum memory",font=("",18,"bold")).pack(anchor="w")
-        ttk.Label(outer,text="Set model parameters, choose output, then run. Plots open in closable windows.").pack(anchor="w",pady=(3,10))
+        ttk.Label(outer,text="Edit settings to preview pulses. Run simulation for full results.").pack(anchor="w",pady=(3,10))
         self.tabs=ttk.Notebook(outer)
         self.tabs.pack(fill="both",expand=True)
         groups=list(dict.fromkeys(row[0] for row in FIELDS if row[0]!="Simultaneous resonance"))
@@ -339,6 +335,17 @@ class ParameterPanel:
             equations=ttk.Frame(tab,padding=(12,16,12,12))
             equations.grid(row=0,column=1,sticky="new")
             equations.columnconfigure(0,weight=1)
+            if group == "Pulses and input state":
+                equations.grid(sticky="nsew")
+                equations.rowconfigure(0,weight=1)
+                self.pulse_preview_tabs=ttk.Notebook(equations)
+                self.pulse_preview_tabs.grid(row=0,column=0,sticky="nsew")
+                self.pulse_preview_frame=ttk.Frame(self.pulse_preview_tabs,padding=4)
+                reference=ttk.Frame(self.pulse_preview_tabs,padding=8)
+                self.pulse_preview_tabs.add(self.pulse_preview_frame,text="Live preview")
+                self.pulse_preview_tabs.add(reference,text="Equations and notes")
+                equations=reference
+                equations.columnconfigure(0,weight=1)
             for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ","RYDBERG_MANIFOLD")):
                 label_cell=ttk.Frame(frame)
                 label_cell.grid(row=row,column=0,sticky="w",padx=(0,12),pady=7)
@@ -407,8 +414,17 @@ class ParameterPanel:
         self.progress_bar=ttk.Progressbar(progress_row,mode="determinate",maximum=100,variable=self.progress)
         self.progress_bar.pack(side="left",fill="x",expand=True)
         ttk.Label(progress_row,textvariable=self.progress_label,width=6,anchor="e").pack(side="right",padx=(8,0))
+        from pulse_preview_panel import PulsePreview
+        self.pulse_preview=PulsePreview(
+            self.pulse_preview_frame,self.root,self.config,
+            lambda: (self.tabs.select()==str(self.parameter_tabs["Pulses and input state"])
+                     and self.pulse_preview_tabs.select()==str(self.pulse_preview_frame)))
+        self.tabs.bind("<<NotebookTabChanged>>",self.pulse_preview.visibility_changed,add="+")
+        self.pulse_preview_tabs.bind("<<NotebookTabChanged>>",self.pulse_preview.visibility_changed,add="+")
+        self.mode.trace_add("write",lambda *_: self.pulse_preview.sync_output(self.mode.get()))
         for value in self.entries.values():
             value.trace_add("write",self.update_swap_rates)
+            value.trace_add("write",self.pulse_preview.schedule)
         for key in ("CONSTANT_FLUX", "CONSTANT_FIELD"):
             self.entries[key].trace_add("write",self.update_coupling_mode)
         self.mode.trace_add("write",self.update_swap_rates)
@@ -1114,6 +1130,8 @@ class ParameterPanel:
         self.assistant_cancel.set()
         if self.temp_path:
             self.temp_path.unlink(missing_ok=True)
+        if getattr(self,"pulse_preview",None) is not None:
+            self.pulse_preview.close()
         self.root.destroy()
 
 
