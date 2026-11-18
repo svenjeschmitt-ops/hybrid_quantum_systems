@@ -12,12 +12,14 @@ def control_preview(settings, direction='write', times=None):
     config = validate(settings)
     controls = effective_controls(config)
     values = derived(config)
-    prep = (0., values['optical_pi_pulse_us'])
+    optical0 = values['optical_pi_pulse_us']
+    optical1 = values['optical_pi_pulse_1_us']
+    prep = (0., optical0 if direction == 'write' else max(optical0, optical1))
     tc, ac = pulse_intervals(config, prep[1]+config['GAP'],
                             values['transmon_pulse_duration_us'],
                             values['atom_pulse_duration_us'], direction)
     mapping_start = max(tc[1], ac[1])+config['GAP']
-    mapping = (mapping_start, mapping_start+prep[1])
+    mapping = (mapping_start, mapping_start+(max(optical0, optical1) if direction == 'write' else optical0))
     finish = mapping[1]
     if times is None:
         points = [np.linspace(0, mapping[1], 601),

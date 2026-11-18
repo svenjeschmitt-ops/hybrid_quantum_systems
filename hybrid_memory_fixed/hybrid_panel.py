@@ -38,7 +38,6 @@ from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from hybrid_settings import FIELDS, DEFAULTS, PULSE_DELAY_KEYS, validate, derived
 from model_editors import TITLES as MODEL_TITLES, add_model_control
-from optical_model import optical_peak
 from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
 from assistant_proposals import parse_proposal, prepare_application
@@ -55,9 +54,6 @@ MODES = [
 
 # Symbols use the same notation as the equations beneath each tab.
 PARAMETER_SYMBOLS = {
-    "ATOMIC_SPECTRUM": r"E_i(E),d_{ij}(E)",
-    "OPTICAL_SCHEME": r"H_{\mathrm{opt}}",
-    "DISSIPATION": r"\mathcal{L}_{\mathrm{additional}}",
     "CONSTANT_FLUX": r"\phi(t)=\phi_{\mathrm{swap}}",
     "CONSTANT_FIELD": r"E(t)=V_{\mathrm{swap}}/\ell+E_{\mathrm{stray}}",
     "WRITE_PULSE_DELAY_NS": r"\tau_{\mathrm{write}}",
@@ -95,7 +91,8 @@ PARAMETER_SYMBOLS = {
     "TAU_WRONG": r"\tau_w",
     "TPHI_R": r"T_{\phi,R}",
     "TPHI_H": r"T_{\phi,H}",
-    "OMEGA": r"\Omega_{\max}/(2\pi)",
+    "OMEGA": r"\Omega_{0}/(2\pi)",
+    "OMEGA_1": r"\Omega_{1}/(2\pi)",
     "RAMP": r"T_{\mathrm{ramp}}",
     "TC_PULSE_SCALE": r"s_{TC}",
     "AC_PULSE_SCALE": r"s_{AC}",
@@ -121,7 +118,8 @@ PARAMETER_CAPTIONS = {
     "BETA": "Capacitive participation",
     "D_01_EA0": "Atomic transition dipole magnitude",
     "DIPOLE_ALIGNMENT": "Dipole-field alignment",
-    "OMEGA": "Peak effective optical Rabi frequency",
+    "OMEGA": "h0 ↔ r0 peak effective optical Rabi frequency",
+    "OMEGA_1": "h1 ↔ r1 peak effective optical Rabi frequency",
 }
 
 
@@ -167,7 +165,7 @@ SECTION_EQUATIONS = {
             r"$f_{\mathrm{swap},TC}=2g_{TC}/(2\pi),\qquad f_{\mathrm{swap},AC}=2g_{AC}/(2\pi),\qquad t_{\mathrm{ref}}=1/(2f_{\mathrm{swap}})$",
             r"$\beta=\frac{C_g}{C_\Sigma},\qquad n_{01}\approx\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
         ),
-        'C_g: coupling capacitance; C_Σ: total transmon capacitance. The charge matrix element is evaluated at the interaction flux and held fixed during a run. These formulas apply without manual overrides or dipole tables. A signed dipole table gives g_AC(E) = d_01(E) E_zpf / ℏ, with alignment already included. Timing uses its magnitude at the interaction field. Swap frequencies are ideal single-excitation references; rounded pulses and detuning change transfer.',
+        'C_g: coupling capacitance; C_Σ: total transmon capacitance. The charge matrix element is evaluated at the interaction flux and held fixed during a run. These formulas apply without manual overrides. Swap frequencies are ideal single-excitation references; rounded pulses and detuning change transfer.',
     ),
     "Direct coupling": (
         (
@@ -175,34 +173,34 @@ SECTION_EQUATIONS = {
             r"$f_{\mathrm{swap},j}=2g_{j,\mathrm{input}},\qquad t_{\mathrm{ref},j}=1/(4g_{j,\mathrm{input}})$",
             r"$T_j=s_j(2T_{\mathrm{ramp}}+t_{\mathrm{ref},j}),\qquad j\in\{TC,AC\}$",
         ),
-        'Inputs are g/(2π) in MHz; Hamiltonian couplings are in rad/μs. These equations apply without a dipole table. A supplied atomic dipole table takes precedence: g_AC(E) = d_01(E) E_zpf / ℏ. Timing then uses its magnitude at the interaction field. Other manual couplings remain constant during each run. Changing couplings does not retune sequential controls or optimize pulse multipliers.',
+        'Inputs are g/(2π) in MHz; Hamiltonian couplings are in rad/μs. Manual couplings remain constant during each run. Changing couplings does not retune sequential controls or optimize pulse multipliers.',
     ),
     "Atom and electrodes": (
         (
             r"$E(t)=V(t)/\ell+E_{\mathrm{stray}},\quad E_{\mathrm{swap}}=V_{\mathrm{swap}}/\ell+E_{\mathrm{stray}}$",
-            r"$\varepsilon_i(E)=\varepsilon_i(0)+K_iE^2\ \mathrm{or\ supplied\ table},\quad f_A(E)=\varepsilon_{r1}(E)-\varepsilon_{r0}(E)$",
+            r"$\varepsilon_i(E)=\varepsilon_i(0)+K_iE^2,\quad f_A(E)=\varepsilon_{r1}(E)-\varepsilon_{r0}(E)$",
             r"$V_{\mathrm{park}}=\ell(E_{\mathrm{park}}-E_{\mathrm{stray}}),\quad \Delta_A(t)=2\pi[f_A(E(t))-f_c]$",
             r"$\Delta_{w,r0}(E)=2\pi[\varepsilon_w(E)-\varepsilon_{r0}(E)],\qquad \Omega_w(t)=\eta\,\Omega(t)$",
         ),
-        'ε_i = energy/h relative to zero-field r0 (MHz). Quadratic defaults: ε_r0(0) = 0, ε_r1(0) = f_A,0, ε_w(0) = f_wrong,split. A supplied table replaces that level’s quadratic formula, with interpolation and no extrapolation. Extra offsets are relative to their branch.\n\nHold field constant uses the entered voltage throughout; interpret E_park = E_swap. ℓ: cm; E: V/cm; K: MHz/(V/cm)², including −α/(2h). w denotes one unwanted level (r0_wrong), with relative optical amplitude η. Equations use nominal controls.',
+        'ε_i = energy/h relative to zero-field r0 (MHz). Quadratic defaults: ε_r0(0) = 0, ε_r1(0) = f_A,0, ε_w(0) = f_wrong,split. Extra offsets are relative to their branch.\n\nHold field constant uses the entered voltage throughout; interpret E_park = E_swap. ℓ: cm; E: V/cm; K: MHz/(V/cm)², including −α/(2h). w denotes one unwanted level (r0_wrong), with relative optical amplitude η. Equations use nominal controls.',
     ),
     "Loss and coherence": (
         (
-            r"$L_{T,\downarrow}=\sqrt{(1+\bar n_T)/T_{1,T}}\,b,\quad L_{T,\uparrow}=\sqrt{\bar n_T/T_{1,T}}\,b^\dagger,\quad L_{j\to k}=\sqrt{B_{jk}/\tau_j}\,|k\rangle\langle j|$",
+            r"$L_T=b/\sqrt{T_{1,T}},\quad L_C=a/\sqrt{T_{1,c}},\quad L_j=|k_j\rangle\langle j|/\sqrt{\tau_j}$",
             r"$L_{\phi,T}=\frac{Z_T}{\sqrt{2T_{\phi,T}}},\qquad L_{\phi,R}=\frac{Z_R}{\sqrt{2T_{\phi,R}}},\qquad L_{\phi,H}=\frac{Z_H}{\sqrt{2T_{\phi,H}}}$",
             r"$Z_T=2b^\dagger b-I,\quad Z_R=P_{r1}-P_{r0}+\sum_{j\in\mathrm{extra}}s_jP_j,\quad Z_H=P_{h1}-P_{h0}$",
             r"$\frac{1}{T_{2,T}}=\frac{1}{2T_{1,T}}+\frac{1}{T_{\phi,T}},\qquad Q_c=2\pi f_cT_{1,c}$",
         ),
-        'Times: μs. B_jk: decay fraction (default: all to lost). j includes all modeled Rydberg levels. Extra-level s_j = −1/+1 for lower/upper branch; built-in wrong has zero weight in Z_R. Cavity thermal jumps use b → a, T1,T → T1,c, n̄_T → n̄_c. Explicit transmon ladder rates override the shown thermal-jump formula.\n\nThe T2 relation assumes zero temperature, standard T1 and no added noise or optical drive. Additional noise can add branching, transitions, dephasing, control noise and optical scattering.',
+        'Times: μs. Rydberg r1 decays to r0; other Rydberg levels decay to lost. Extra-level s_j = −1/+1 for lower/upper branch; built-in wrong has zero weight in Z_R. The T2 relation assumes standard relaxation and no optical drive.',
     ),
     "Pulses and input state": (
         (
-            r"$\Omega(t)=\Omega_{\max}\sin^2\!\left(\frac{\pi(t-t_0)}{T_{\mathrm{opt}}}\right),\quad \int_{t_0}^{t_0+T_{\mathrm{opt}}}\Omega(t)\,dt=\pi,\quad T_{\mathrm{opt}}=\frac{2\pi}{\Omega_{\max}}$",
+            r"$\Omega_j(t)=\Omega_{j,\max}\sin^2\!\left(\frac{\pi(t-t_0)}{T_j}\right),\quad \int\Omega_j(t)\,dt=\pi,\quad T_j=\frac{2\pi}{\Omega_{j,\max}},\quad j=0,1$",
             r"$t_{\mathrm{ref},j}=\frac{\pi}{2g_j},\qquad T_j=s_j(2T_{\mathrm{ramp}}+t_{\mathrm{ref},j}),\quad j=TC,AC$",
             r"$w(u)=\sin^2(\pi u/T_{\mathrm{swap}}),\quad 0\leq u\leq T_{\mathrm{swap}};\qquad w=0\ \mathrm{outside}$",
             r"$|\psi_{\mathrm{in}}\rangle=\cos(\vartheta/2)|0_L\rangle+e^{i\varphi}\sin(\vartheta/2)|1_L\rangle,\quad t_{\mathrm{end,write}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
         ),
-        'Times: μs; delays: ns; angles: degrees. Ω_max is angular frequency. The π area is a reference, not guaranteed transfer. Laser model uses sin envelopes for each microscopic laser; their product follows sin². Its reference peak is |Δ Ω_lower Ω_upper|/[2(Δ² + Γ²/4)] in angular units; Γ is the decay rate.\n\nLogical states: g/e for writing, h0/h1 for retrieval. Storage follows writing and precedes retrieval. GAP separates optical and exchange stages. Delay = voltage peak − flux peak; auto uses flux first for writing, voltage first for reading. Pulse multipliers include RAMP.',
+        'Times: μs; delays: ns; angles: degrees. Ω_max is angular frequency. The π area is a reference, not guaranteed transfer. Each transition has its own effective peak Ω and sin² pulse duration; the two mapping pulses start together and the stage ends when both finish.\n\nLogical states: g/e for writing, h0/h1 for retrieval. Storage follows writing and precedes retrieval. GAP separates optical and exchange stages. Delay = voltage peak − flux peak; auto uses flux first for writing, voltage first for reading. Pulse multipliers include RAMP.',
     ),
     "Experimental tolerances": (
         (
@@ -299,7 +297,6 @@ class ParameterPanel:
         root.minsize(min(width,1100),min(height,700))
         self.entries={}
         self.input_widgets={}
-        self.optical_peak_display=tk.StringVar()
         self.equation_images={}
         self.symbol_images={}
         self.parameter_tabs={}
@@ -500,7 +497,6 @@ class ParameterPanel:
         for key in ('PHI_PARK', 'E_PARK'):
             constant=constant_flux if key=='PHI_PARK' else constant_field
             self.input_widgets[key].configure(state='disabled' if constant else 'normal')
-        self.update_model_input_states()
         group="Direct coupling" if manual else "Coupling parameters"
         self.equation_images["Coupling parameters"]=tk.PhotoImage(master=self.root,
             data=base64.b64encode(section_equations_png(group,dpi=self.root.winfo_fpixels("1i"),
@@ -508,59 +504,6 @@ class ParameterPanel:
         self.coupling_note.configure(text=SECTION_EQUATIONS[group][1])
         self.resize_reference(group,self.coupling_equation_label,self.coupling_note,
                               self.coupling_note.master.winfo_width())
-
-    def update_model_input_states(self):
-        """Keep all main-panel overrides consistent without changing saved inputs."""
-        self.update_atomic_input_states()
-        try:
-            noise = json.loads(self.entries['DISSIPATION'].get())
-            explicit_rates = bool(noise.get('transmon_down_rates_per_us', []))
-        except (ValueError, TypeError, AttributeError):
-            pass
-        else:
-            self.input_widgets['T1_T'].configure(state='disabled' if explicit_rates else 'normal')
-        try:
-            optics = json.loads(self.entries['OPTICAL_SCHEME'].get())
-            detailed = bool(optics)
-            if detailed:
-                self.optical_peak_display.set(f"{optical_peak({'OPTICAL_SCHEME': optics}):.8g}")
-        except (ValueError, TypeError, KeyError, ZeroDivisionError):
-            return
-        self.input_widgets['OMEGA'].configure(
-            textvariable=self.optical_peak_display if detailed else self.entries['OMEGA'],
-            state='disabled' if detailed else 'normal')
-
-    def update_atomic_input_states(self):
-        """Disable only parameters fully replaced by the current atomic tables."""
-        try:
-            spectrum = json.loads(self.entries['ATOMIC_SPECTRUM'].get())
-            levels = json.loads(self.entries['RYDBERG_MANIFOLD'].get())
-            energies = spectrum.get('energies_MHz', {})
-            dipoles = spectrum.get('dipoles_ea0', {})
-            # F_A_ZERO also supplies the zero-field reference for every upper
-            # extra level that still uses its quadratic energy model.
-            upper_fallback = 'r1' not in energies or any(
-                level['branch'] == 1 and level['label'] not in energies for level in levels)
-            overridden = {
-                'K_R0': 'r0' in energies,
-                'K_R1': 'r1' in energies,
-                'K_WRONG': 'wrong' in energies,
-                'F_WRONG_SPLIT': 'wrong' in energies,
-                'F_A_ZERO': not upper_fallback,
-            }
-            links = {'r1<-r0': 1.}
-            links.update({f"{level['label']}<-{source}": strength
-                          for level in levels for source, strength in level['cavity_from'].items()})
-            physical_dipole_used = any(strength and link not in dipoles
-                                       for link, strength in links.items())
-        except (ValueError, TypeError, KeyError, AttributeError):
-            return
-        for key, disabled in overridden.items():
-            self.input_widgets[key].configure(state='disabled' if disabled else 'normal')
-        manual = self.entries['DIRECT_COUPLING'].get() in ('1', '1.0')
-        for key in ('D_01_EA0', 'DIPOLE_ALIGNMENT'):
-            self.input_widgets[key].configure(
-                state='disabled' if manual or not physical_dipole_used else 'normal')
 
     def build_sweep_controls(self,parent,row,width):
         optional=ttk.LabelFrame(parent,text="Optional",padding=12)
@@ -932,7 +875,6 @@ class ParameterPanel:
         if getattr(self,"_updating_assistant_values",False):
             return
         self.update_sweep_preview()
-        self.update_model_input_states()
         try:
             config=self.config()
             d=derived(config)
@@ -1010,7 +952,7 @@ class ParameterPanel:
             self.status.set(
                 f"Model checks passed. Swap detuning TC/AC: "
                 f"{d['transmon_swap_detuning_MHz']:.5g}/{d['atom_swap_detuning_MHz']:.5g} MHz; "
-                f"optical pulse: {d['optical_pi_pulse_us']:.5g} us; "
+                f"optical pulses h0/r0: {d['optical_pi_pulse_us']:.5g} us, h1/r1: {d['optical_pi_pulse_1_us']:.5g} us; "
                 f"nominal atom swap hold: {d['atom_swap_hold_us']:.5g} us; "
                 f"cavity Q: {d['cavity_Q']:.4g}.")
             return True

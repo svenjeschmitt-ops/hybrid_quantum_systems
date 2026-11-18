@@ -1,3 +1,7 @@
+# Historical documentation — additional channels removed
+
+This document describes a removed feature and is retained for reference. Current simulations use standard lifetimes and pure dephasing. Nonempty legacy DISSIPATION settings must be removed before running.
+
 # Configurable master equation
 
 The effective Hamiltonian is unchanged. The density matrix now supports
@@ -37,7 +41,7 @@ results as a device prediction. Existing pulse calibrations may need retuning.
 | `cavity_nbar` | 0 | Mean bath occupation: c_down = sqrt((nbar+1)/T1_C) a, c_up = sqrt(nbar/T1_C) a†. T1_C is the bare photon-number damping time. |
 | `transmon_nbar` | 0 | Effective bath occupation for transmon heating; downward/upward rates carry nbar+1/nbar. One constant occupation approximates a bath across the ladder bandwidth. It is not a frequency-dependent Gibbs bath. |
 | `transmon_down_rates_per_us` | [] | Exactly NT−1 bare rates ordered 1→0, 2→1, etc. Nonempty selects independent jumps sqrt(gamma_j(nbar+1)) ket(j−1)bra(j) and their thermal reverses. There is **no additional j or sqrt(j)** factor. Empty preserves the original collective oscillator jump b/sqrt(T1_T), with optional thermal reverse. |
-| `atomic_branching` | {} | Mapping source → {destination: fraction}. Replaces that source's lifetime-to-loss jump. Fractions must sum to one; include `lost` explicitly. Total lifetime decay remains 1/tau_source. Unspecified sources decay entirely to `lost`. |
+| `atomic_branching` | {} | Mapping source → {destination: fraction}. Replaces that source's lifetime-to-loss jump. Fractions must sum to one; include `lost` explicitly. Total lifetime decay remains 1/tau_source. By default `r1` decays entirely to `r0`; other unspecified sources decay entirely to `lost`. |
 | `atomic_transitions` | [] | Additional independent channels `{source, target, rate_per_us}`. Can represent measured blackbody redistribution or other incoherent transitions. Rates **add** to lifetime decay. Specify both directions when appropriate; detailed balance is not inferred. |
 | `atomic_projector_dephasing_per_us` | {} | Mapping state → gamma for sqrt(gamma) P_state. A coherence between this state and an otherwise unaffected state decays at gamma/2. Adds to existing TPHI channels. |
 | `flux_white_psd` | 0 | White flux noise strength S_phi in (Phi/Phi0)^2 us, as defined below. |

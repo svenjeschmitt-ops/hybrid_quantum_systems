@@ -27,7 +27,7 @@ MODES = {
 # These alter the protocol rather than the requested memory task or noise model.
 CONTROL_FIELDS = {'PHI_SWAP', 'PHI_PARK', 'V_SWAP', 'E_PARK', 'CONSTANT_FLUX',
                   'CONSTANT_FIELD', 'TC_PULSE_SCALE', 'AC_PULSE_SCALE', 'RAMP',
-                  'SIM_HOLD_SCALE', 'SIM_RAMP', 'WRITE_PULSE_DELAY_NS', 'READ_PULSE_DELAY_NS', 'OMEGA', 'GAP'}
+                  'SIM_HOLD_SCALE', 'SIM_RAMP', 'WRITE_PULSE_DELAY_NS', 'READ_PULSE_DELAY_NS', 'OMEGA', 'OMEGA_1', 'GAP'}
 GAIN_THRESHOLD = 1e-5
 
 

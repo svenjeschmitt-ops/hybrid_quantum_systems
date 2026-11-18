@@ -47,10 +47,10 @@ def model(b, include_storage=True, direction="write"):
     ramp = 0.0 if constant_flux and constant_field else c['SIM_RAMP']
     hold = c['SIM_HOLD_SCALE']*info['reference_hold_us']
     duration = c['SIM_HOLD_SCALE']*(2*ramp+info['reference_hold_us'])
-    prep = (0.0, b.T_OPT)
+    prep = (0.0, b.T_OPT if direction == "write" else max(b.T_OPT, b.T_OPT_1))
     start = prep[1]+b.GAP
     end = start+duration
-    mapping = (end+b.GAP, end+b.GAP+b.T_OPT)
+    mapping = (end+b.GAP, end+b.GAP+(max(b.T_OPT, b.T_OPT_1) if direction == "write" else b.T_OPT))
     finish = mapping[1]+(b.STORAGE if include_storage and direction == "write" else 0.0)
 
     def flux(t):
@@ -83,11 +83,12 @@ def model(b, include_storage=True, direction="write"):
     terms = [*b.coupling_terms(field, info['g_TC_rad_per_us']), b.H_anharm,
              [b.n, b.cavity_error], [b.Nt, dt], [b.Pr0, d0], [b.Pr1, d1],
              [b.Pwrong_base, dw], *b.extra_atomic_terms(field)]
-    pulses = ([(0, prep), (0, mapping), (1, mapping)] if direction == "write"
-              else [(0, prep), (1, prep), (0, mapping)])
+    pulses = ([(0, prep), (0, (mapping[0], mapping[0]+b.T_OPT)), (1, (mapping[0], mapping[0]+b.T_OPT_1))] if direction == "write"
+              else [(0, (0., b.T_OPT)), (1, (0., b.T_OPT_1)), (0, mapping)])
     h = qt.QobjEvo(terms)+b.optical_protocol(pulses, nominal_field)[0]
     points = [np.linspace(0, mapping[1], 1401), np.array([
-        *prep, start, (start+end)/2, end, *mapping])]
+        *prep, start, (start+end)/2, end, *mapping,
+        *(point for _, interval in pulses for point in interval)])]
     if include_storage and b.STORAGE and direction == "write":
         points.append(np.linspace(mapping[1], finish, 301))
     # Retain hold_us as the scaled ideal reference for existing report consumers.
@@ -110,15 +111,7 @@ def collapse_channels(b, include_storage=True, direction="write"):
     intervals = info['stages']
     first = intervals['Preparation' if direction == 'write' else 'Memory to Rydberg']
     last = intervals['Optical mapping' if direction == 'write' else 'Return atom to h0']
-    def optical0(t):
-        return b.optical_envelope(t, *first)+b.optical_envelope(t, *last)
-    def optical1(t):
-        return b.optical_envelope(t, *(last if direction == 'write' else first))
-    pulses = ([(0, first), (0, last), (1, last)] if direction == 'write'
-              else [(0, first), (1, first), (0, last)])
-    nominal_field = info['interaction_field_V_per_cm'] if info['constant_field'] else b.E_PARK
-    return b.protocol_c_ops(flux, field, optical0, optical1,
-                           b.optical_protocol(pulses, nominal_field)[1])
+    return b.protocol_c_ops(flux, field, lambda t: 0., lambda t: 0.)
 
 
 def storage_channels(b, include_storage=True, direction="write"):

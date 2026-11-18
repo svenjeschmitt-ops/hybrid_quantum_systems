@@ -2,10 +2,8 @@
 import json
 import math
 from multilevel import DEFAULT_MANIFOLD, parse_manifold
-from dissipation import DEFAULT_DISSIPATION, parse_dissipation
 from pathlib import Path
-from atomic_model import AtomicModel, parse_spectrum
-from optical_model import parse_optics, optical_peak
+from atomic_model import AtomicModel
 
 # SI constants (e and h are exact; a0 is the Bohr radius in metres).
 ELEMENTARY_CHARGE = 1.602176634e-19
@@ -29,7 +27,6 @@ FIELDS = [
 ("Coupling parameters","DIRECT_COUPLING","Use direct coupling inputs","0=calculated, 1=manual",0,"boolean"),
 ("Coupling parameters","G_TC_MHZ","Transmon-cavity coupling g_TC / (2 pi)","MHz",11.023791568183459,"positive"),
 ("Coupling parameters","G_AC_MHZ","Atom-cavity coupling g_AC / (2 pi)","MHz",10.236358418015183,"positive"),
-("Atom and electrodes","ATOMIC_SPECTRUM","Atomic energies and dipoles","JSON object","{}","atomic_spectrum"),
 ("Atom and electrodes","F_A_ZERO","Zero-field Rydberg transition","MHz",5150.0,"positive"),
 ("Atom and electrodes","K_R0","Lower Rydberg Stark coefficient","MHz/(V/cm)^2",-2.0,"free"),
 ("Atom and electrodes","K_R1","Upper Rydberg Stark coefficient","MHz/(V/cm)^2",-12.0,"free"),
@@ -41,7 +38,6 @@ FIELDS = [
 ("Atom and electrodes","E_PARK","Parked total electric field","V/cm",0.0,"free"),
 ("Atom and electrodes","F_WRONG_SPLIT","Unwanted-level frequency separation","MHz",1320.0,"free"),
 ("Atom and electrodes","REL_WRONG_DIPOLE","Relative unwanted optical amplitude","dimensionless",1.0,"nonnegative"),
-("Loss and coherence","DISSIPATION","Additional Lindblad channels","JSON object",DEFAULT_DISSIPATION,"dissipation"),
 ("Loss and coherence","T1_T","Transmon relaxation time","us",100.0,"positive"),
 ("Loss and coherence","TPHI_T","Transmon PURE dephasing time","us",150.0,"positive"),
 ("Loss and coherence","T1_C","Cavity photon-number lifetime","us",200.0,"positive"),
@@ -50,8 +46,8 @@ FIELDS = [
 ("Loss and coherence","TAU_WRONG","Unwanted Rydberg lifetime","us",100.0,"positive"),
 ("Loss and coherence","TPHI_R","Rydberg-pair pure dephasing time","us",100.0,"positive"),
 ("Loss and coherence","TPHI_H","Hyperfine pure dephasing time","us",100000.0,"positive"),
-("Pulses and input state","OPTICAL_SCHEME","Two-photon optical scheme","JSON object","{}","optical_scheme"),
-("Pulses and input state","OMEGA","Peak effective optical Rabi frequency / 2pi","MHz",100.0,"positive"),
+("Pulses and input state","OMEGA","h0 ↔ r0 peak Rabi frequency / 2pi","MHz",100.0,"positive"),
+("Pulses and input state","OMEGA_1","h1 ↔ r1 peak Rabi frequency / 2pi","MHz",100.0,"positive"),
 ("Pulses and input state","RAMP","Extra duration per pulse half","us",0.0005,"positive"),
 ("Pulses and input state","TC_PULSE_SCALE","Transmon pulse duration multiplier","dimensionless",9.664304506350172,"positive"),
 ("Pulses and input state","AC_PULSE_SCALE","Atomic pulse duration multiplier","dimensionless",3.3585450169623496,"positive"),
@@ -109,7 +105,6 @@ def effective_controls(config):
         controls['PHI_PARK'] = config['PHI_SWAP']
     if config.get('CONSTANT_FIELD', 0):
         controls['E_PARK'] = calculated_swap_field(config)
-    controls["OMEGA"] = optical_peak(config)
     return controls
 
 
@@ -183,14 +178,35 @@ def validate(values):
         previous_delay = values.pop("PULSE_DELAY_NS")
         for key in PULSE_DELAY_KEYS:
             values.setdefault(key, previous_delay)
+    legacy = values.pop("DISSIPATION", "{}")
+    try:
+        legacy = json.loads(legacy) if isinstance(legacy, str) else legacy
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid removed DISSIPATION setting.") from exc
+    if legacy:
+        raise ValueError("DISSIPATION has been removed; remove its nonempty configuration before running.")
+    spectrum = values.pop("ATOMIC_SPECTRUM", "{}")
+    try:
+        spectrum = json.loads(spectrum) if isinstance(spectrum, str) else spectrum
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid removed ATOMIC_SPECTRUM setting.") from exc
+    if spectrum:
+        raise ValueError("ATOMIC_SPECTRUM has been removed; remove its nonempty configuration before running.")
+    optics = values.pop("OPTICAL_SCHEME", "{}")
+    try:
+        optics = json.loads(optics) if isinstance(optics, str) else optics
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid removed OPTICAL_SCHEME setting.") from exc
+    if optics:
+        raise ValueError("OPTICAL_SCHEME has been removed; remove its nonempty configuration and set both effective optical frequencies before running.")
+    if "OMEGA" in values and "OMEGA_1" not in values:
+        values["OMEGA_1"] = values["OMEGA"]
     unknown = set(values) - set(DEFAULTS)
     if unknown:
         raise ValueError("Unknown settings: " + ", ".join(sorted(unknown)))
     config = dict(DEFAULTS)
     config.update(values)
     for _,key,label,_,_,rule in FIELDS:
-        if rule in ("dissipation", "atomic_spectrum", "optical_scheme"):
-            continue  # Validate after NT and the atomic manifold have been parsed.
         if rule == "optional_delay" and (config[key] is None or str(config[key]).strip().lower() == "auto"):
             config[key] = None
             continue
@@ -233,16 +249,12 @@ def validate(values):
             raise ValueError(label + " transmon flux must be between 0 and 0.5 Phi/Phi0.")
         if calculated_transmon_frequency(config, config[key]) <= 0:
             raise ValueError(label + " flux gives a nonpositive transmon frequency; use a transmon operating point with EJ >> EC.")
-    config["ATOMIC_SPECTRUM"] = json.dumps(parse_spectrum(config["ATOMIC_SPECTRUM"], config), sort_keys=True)
-    config["OPTICAL_SCHEME"] = json.dumps(parse_optics(config["OPTICAL_SCHEME"], config), sort_keys=True)
     for label, value in coupling_strengths(config).items():
         if not math.isfinite(value) or value <= 0:
             raise ValueError(label + " must be finite and greater than zero for swap timing.")
     for phi in (config["PHI_PARK"], config["PHI_SWAP"]):
         if calculated_transmon_frequency(config, phi) - config["EC"]*(config["NT"]-2) <= 0:
             raise ValueError("Transmon truncation exceeds the validity of the weakly anharmonic ladder.")
-    config["DISSIPATION"] = json.dumps(parse_dissipation(
-        config["DISSIPATION"], config["NT"], parse_manifold(config["RYDBERG_MANIFOLD"])), sort_keys=True)
     return config
 
 
@@ -297,6 +309,7 @@ def derived(config):
         "atom_swap_detuning_MHz": float(AtomicModel(c).transition(swap_field))-c["FC"],
         "park_voltage_V": c["GAP_CM"]*(c["E_PARK"]-c["STRAY_FIELD"]),
         "optical_pi_pulse_us": 1/c["OMEGA"],
+        "optical_pi_pulse_1_us": 1/c["OMEGA_1"],
         "transmon_swap_frequency_MHz": 2*couplings["transmon_coupling_MHz"],
         "atom_swap_frequency_MHz": 2*couplings["atom_coupling_MHz"],
         "transmon_swap_hold_us": 1/(4*couplings["transmon_coupling_MHz"]),

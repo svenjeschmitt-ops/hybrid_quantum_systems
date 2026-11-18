@@ -5,58 +5,20 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 TITLES = {
-    'OPTICAL_SCHEME': 'Two-photon optical model',
-    'ATOMIC_SPECTRUM': 'Atomic energy and dipole tables',
-    'DISSIPATION': 'Additional loss and noise channels',
     'RYDBERG_MANIFOLD': 'Additional Rydberg levels',
 }
 
 
 BUTTON_LABELS = {
-    'OPTICAL_SCHEME': 'Laser model…',
-    'ATOMIC_SPECTRUM': 'Energy & dipole tables…',
-    'DISSIPATION': 'Additional noise…',
     'RYDBERG_MANIFOLD': 'Rydberg levels…',
 }
 
 
 def example_model(key, config):
     """Editable illustrative values; called with validated current panel settings."""
-    from atomic_model import atomic_levels
     from multilevel import DEFAULT_MANIFOLD
     if key == 'RYDBERG_MANIFOLD':
         return json.loads(DEFAULT_MANIFOLD)
-    if key == 'OPTICAL_SCHEME':
-        levels = atomic_levels(config)
-        field = (config['V_SWAP']/config['GAP_CM']+config['STRAY_FIELD']
-                 if config['CONSTANT_FIELD'] else config['E_PARK'])
-        spread = max(abs(offset+stark*field**2) for _, offset, stark in levels.values())
-        detuning = max(100000., 100*spread, 100*config['OMEGA'])
-        # Zero linewidth makes this seed reproduce the entered effective peak.
-        rabi = math.sqrt(2*detuning*config['OMEGA'])
-        return dict(mode='effective', provenance='ILLUSTRATIVE laser parameters derived from the panel Rabi frequency',
-                    arms={str(i): dict(detuning_MHz=detuning, lower_rabi_MHz=rabi,
-                          upper_rabi_MHz=rabi, linewidth_per_us=0.,
-                          branching={f'h{i}': 0.5, 'lost': 0.5}) for i in (0, 1)})
-    if key == 'ATOMIC_SPECTRUM':
-        swap = config['V_SWAP']/config['GAP_CM']+config['STRAY_FIELD']
-        park = swap if config['CONSTANT_FIELD'] else config['E_PARK']
-        low = min(park, swap)-config['EFIELD_TOL']
-        high = max(park, swap)+config['EFIELD_TOL']
-        if high == low:
-            low, high = low-1., high+1.
-        fields = [low+(high-low)*i/8 for i in range(9)]
-        return dict(provenance='ILLUSTRATIVE samples of the current quadratic Stark model; no independent atomic data',
-                    field_V_per_cm=fields,
-                    energies_MHz={name: [offset+stark*f*f for f in fields]
-                                  for name, (_, offset, stark) in atomic_levels(config).items()},
-                    dipoles_ea0={})
-    if key == 'DISSIPATION':
-        return dict(cavity_nbar=0.01, transmon_nbar=0.001,
-                    atomic_branching={'r0': {'h0': 0.1, 'lost': 0.9},
-                                      'r1': {'h1': 0.1, 'lost': 0.9}},
-                    atomic_transitions=[dict(source='r1', target='r0', rate_per_us=0.0001)],
-                    flux_white_psd=0., field_white_psd=0.)
     raise KeyError(key)
 
 
@@ -74,21 +36,6 @@ def unique_mapping(rows, key_columns, value_column):
         if key in result:
             raise ValueError('Duplicate entry: ' + ', '.join(map(str, key)))
         result[key] = row[value_column]
-    return result
-
-
-def spectrum_from_rows(provenance, rows):
-    """Convert a long-form data table without silently losing duplicate samples."""
-    samples = unique_mapping(rows, (0, 1, 2), 3)
-    fields = sorted({row[0] for row in rows})
-    result = dict(provenance=provenance, field_V_per_cm=fields,
-                  energies_MHz={}, dipoles_ea0={})
-    for kind, name in sorted({(row[1], row[2]) for row in rows}):
-        try:
-            values = [samples[field, kind, name] for field in fields]
-        except KeyError:
-            raise ValueError(f'{name}: provide a value at every field sample.') from None
-        result['energies_MHz' if kind == 'Energy' else 'dipoles_ea0'][name] = values
     return result
 
 
@@ -270,49 +217,6 @@ class ModelEditor:
             return
         self.window.destroy()
 
-    def build_optical_scheme(self, value):
-        general = self.page('Model', 'Disabled: use the effective optical Rabi frequency on the main panel. '
-                            'Enabled: derive it from the laser parameters below. Both arms must give the same effective peak.')
-        mode = self.field(general, 'Intermediate-state model', value.get('mode', 'effective'), ('effective', 'explicit'))
-        provenance = self.field(general, 'Parameter source / description', value.get('provenance', ''))
-        ttk.Label(general, text='Effective: eliminate a far-detuned intermediate state.\n'
-                  'Explicit: retain intermediate-state dynamics.\n'
-                  'Use measured or calculated laser parameters. Prefilled examples are illustrative.',
-                  wraplength=800).pack(anchor='w', pady=12)
-        arms = {}
-        for arm in ('0', '1'):
-            spec = value.get('arms', {}).get(arm, {})
-            page = self.page(f'Arm {arm}', f'h{arm} ↔ intermediate ↔ r{arm}. Rabi frequencies are signed Ω/(2π).')
-            fields = {key: self.field(page, title, spec.get(key, '')) for key, title in (
-                ('detuning_MHz', 'Intermediate detuning (MHz)'), ('lower_rabi_MHz', 'Lower laser Rabi frequency (MHz)'),
-                ('upper_rabi_MHz', 'Upper laser Rabi frequency (MHz)'), ('linewidth_per_us', 'Intermediate decay rate (1/μs)'))}
-            branching = RowTable(page, 'Decay branching', [col('Destination state'), col('Fraction', number)],
-                                 spec.get('branching', {}).items(), 'Fractions must sum to 1; use lost for unmodeled destinations.')
-            arms[arm] = fields, branching
-        def collect():
-            result = dict(mode=mode.get(), provenance=provenance.get(), arms={})
-            for arm, (fields, table) in arms.items():
-                spec = {key: number(var.get()) for key, var in fields.items()}
-                spec['branching'] = {key[0]: val for key, val in unique_mapping(table.rows(), (0,), 1).items()}
-                result['arms'][arm] = spec
-            return result
-        self.collect = collect
-
-    def build_atomic_spectrum(self, value):
-        page = self.page('Field-dependent data', 'Add measured or calculated samples. Each state or link needs a value at every field. '
-                         'Energy names: r0, r1, wrong, or extra level labels. Dipole links use upper<-lower, e.g. r1<-r0. '
-                         'Paste tab-separated rows directly from a spreadsheet: field, type, state/link, value.')
-        provenance = self.field(page, 'Data source / description', value.get('provenance', ''))
-        rows = []
-        for key, kind in (('energies_MHz', 'Energy'), ('dipoles_ea0', 'Dipole')):
-            for name, values in value.get(key, {}).items():
-                rows.extend((field, kind, name, val) for field, val in zip(value['field_V_per_cm'], values))
-        table = RowTable(page, 'Data samples', [col('Field (V/cm)', number), col('Type', str, ('Energy', 'Dipole')),
-                         col('State / link'), col('Value (MHz / e a₀)', number)], rows,
-                         'Energies are relative to zero-field r0. Include both r0 and r1 if entering energies. '
-                         'The field range must cover all pulse fields and tolerances.')
-        self.collect = lambda: spectrum_from_rows(provenance.get(), table.rows())
-
     def build_rydberg_manifold(self, value):
         page = self.page('Levels', 'Branch 0: r0-like; branch 1: r1-like. Offsets are relative to that branch at zero field. '
                          'Remove all rows to use only the built-in levels. Paste rows in the displayed column order.')
@@ -334,37 +238,6 @@ class ModelEditor:
             return result
         self.collect = collect
 
-    def build_dissipation(self, value):
-        page = self.page('Thermal and noise', 'These channels supplement the lifetimes on the main panel. Empty tables retain the standard channels.')
-        scalars = {key: self.field(page, title, value.get(key, 0)) for key, title in (
-            ('cavity_nbar', 'Cavity thermal occupation'), ('transmon_nbar', 'Transmon thermal occupation'),
-            ('flux_white_psd', 'Flux white PSD ((Φ/Φ₀)²·μs)'), ('field_white_psd', 'Field white PSD ((V/cm)²·μs)'))}
-        page = self.page('Transmon rates', 'Optional: enter all NT−1 downward rates, in order 1→0, 2→1, …; otherwise leave empty.')
-        rates = RowTable(page, 'Downward rates', [col('Rate (1/μs)', number)],
-                         [(rate,) for rate in value.get('transmon_down_rates_per_us', [])])
-        page = self.page('Atomic branching', 'Override lifetime decay destinations. Fractions for each source must sum to 1, including lost explicitly.')
-        branching = RowTable(page, 'Branching fractions', [col('Source'), col('Destination'), col('Fraction', number)],
-                            [(src, dst, frac) for src, targets in value.get('atomic_branching', {}).items() for dst, frac in targets.items()])
-        page = self.page('Transitions')
-        transitions = RowTable(page, 'Atomic transitions', [col('Source'), col('Destination'), col('Rate (1/μs)', number)],
-                              [(x['source'], x['target'], x['rate_per_us']) for x in value.get('atomic_transitions', [])])
-        dephasing = RowTable(page, 'Projector dephasing', [col('State'), col('Rate (1/μs)', number)],
-                            value.get('atomic_projector_dephasing_per_us', {}).items())
-        page = self.page('Optical scattering', 'Rates multiply the squared normalized optical envelope. Avoid counting scattering twice when using the detailed optical model.')
-        scattering = RowTable(page, 'Scattering channels', [col('Source'), col('Destination'), col('Arm', int, (0, 1)), col('Rate (1/μs)', number)],
-                              [(x['source'], x['target'], x['arm'], x['rate_per_us']) for x in value.get('optical_scattering', [])])
-        def collect():
-            result = {key: number(var.get()) for key, var in scalars.items()}
-            result['transmon_down_rates_per_us'] = [row[0] for row in rates.rows()]
-            result['atomic_branching'] = {}
-            for (src, dst), fraction in unique_mapping(branching.rows(), (0, 1), 2).items():
-                result['atomic_branching'].setdefault(src, {})[dst] = fraction
-            result['atomic_projector_dephasing_per_us'] = {key[0]: val for key, val in unique_mapping(dephasing.rows(), (0,), 1).items()}
-            result['atomic_transitions'] = [dict(zip(('source', 'target', 'rate_per_us'), row)) for row in transitions.rows()]
-            result['optical_scattering'] = [dict(zip(('source', 'target', 'arm', 'rate_per_us'), row)) for row in scattering.rows()]
-            return result
-        self.collect = collect
-
 
 def add_model_control(parent, row, key, variable, entries, validate):
     """Keep serialized values compatible with existing load/save and preview traces."""
@@ -376,10 +249,6 @@ def add_model_control(parent, row, key, variable, entries, validate):
             value = json.loads(variable.get())
             if key == 'RYDBERG_MANIFOLD':
                 summary.set(f'Active: {len(value)} extra level(s)' if value else 'Built-in levels only')
-            elif key == 'OPTICAL_SCHEME':
-                summary.set(f"Active: {value['mode']} model" if value else 'Off: panel Rabi frequency')
-            elif key == 'ATOMIC_SPECTRUM':
-                summary.set(f"Active: {len(value['field_V_per_cm'])} field samples" if value else 'Off: quadratic Stark model')
             else:
                 summary.set('Active: additional channels' if any(value.values()) else 'Off: standard lifetimes')
         except (ValueError, KeyError, TypeError):

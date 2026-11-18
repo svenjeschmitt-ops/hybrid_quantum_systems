@@ -673,18 +673,17 @@ Run becomes available again as soon as calculation stops or finishes. Starting
 a new simulation automatically closes the previous run's plot windows. Closing
 the panel also closes its active simulation and result windows.
 
-Configurable master equation: see DISSIPATION.md and dissipation_example.json.
-DISSIPATION={} preserves existing channels; additional measured noise is opt-in.
+The standard lifetime and pure-dephasing channels are included. Additional loss and noise settings have been removed.
 
 Physical Hamiltonian: see PHYSICAL_HAMILTONIAN.md and physical_hamiltonian_example.json.
-ATOMIC_SPECTRUM supplies field-dependent energies/dipoles; OPTICAL_SCHEME supplies
-effective or explicit two-photon dynamics, light shifts and derived scattering.
-Both are opt-in; the example is synthetic and requires state-specific calibration.
+The atomic model uses quadratic Stark shifts and constant coupling. The main
+panel sets separate effective optical Rabi frequencies for h0/r0 and h1/r1.
+Their sin-squared pulses have separate durations and carrier frequencies. The
+model does not calculate intermediate-state light shifts or scattering.
 
 Panel model editors
 -------------------
-Use Configure beside the optical scheme, atomic data, additional loss channels,
-or extra Rydberg levels to edit these models with labeled fields and tables.
+Use Configure beside extra Rydberg levels to edit these models with labeled fields and tables.
 Add, edit, and remove table rows, or paste tab-separated rows from a spreadsheet
 in the displayed column order (without headers). Apply checks the complete model
 before updating the panel; Cancel discards changes.

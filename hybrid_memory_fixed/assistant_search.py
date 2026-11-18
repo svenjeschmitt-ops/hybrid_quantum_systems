@@ -14,7 +14,6 @@ import time
 from hybrid_settings import (DEFAULTS, coupling_strengths, calculated_swap_field, calculated_transmon_frequency,
                              derived, resonant_flux, resonant_field, validate, active_delay_keys, pulse_intervals)
 from atomic_model import AtomicModel
-from optical_model import optical_settings
 from simulation_output import real_probability
 from assistant_calculations import (MODES, CONTROL_FIELDS, ComparisonCancelled, _score,
                                     evaluate_backend)
@@ -66,8 +65,6 @@ def locked_controls(config):
         keys+=['CONSTANT_FIELD','V_SWAP','GAP_CM','STRAY_FIELD','E_PARK']
     if config['CONSTANT_FLUX']:
         keys+=['CONSTANT_FLUX','PHI_SWAP','PHI_PARK']
-    if optical_settings(config):
-        keys.append('OMEGA')  # Derived from the physical laser parameters.
     return {key:config[key] for key in keys}
 
 
@@ -92,10 +89,7 @@ def physical_search_space(c, mode, vary_cavity=False):
         low = max(1., calculated_transmon_frequency(c,.5)+201, .65*c['FC'])
         high = min(calculated_transmon_frequency(c,0)-201, 1.35*c['FC'])
         if mode.startswith('Simultaneous cavity resonance:') and not c['CONSTANT_FIELD']:
-            if atom.domain is not None:
-                frequencies = atom.transition(np.linspace(*atom.domain, 257))
-                low, high = max(low, float(np.min(frequencies))), min(high, float(np.max(frequencies)))
-            elif c['K_R1'] < c['K_R0']:
+            if c['K_R1'] < c['K_R0']:
                 high = min(high, c['F_A_ZERO']-1e-6)
             elif c['K_R1'] > c['K_R0']:
                 low = max(low, c['F_A_ZERO']+1e-6)
@@ -112,8 +106,7 @@ def physical_search_space(c, mode, vary_cavity=False):
         add('TC_PULSE_SCALE', .4, 25., True)
         if not c['CONSTANT_FIELD']:
             field = calculated_swap_field(c)
-            low, high = (atom.domain if atom.domain is not None else
-                         (field-max(1.,abs(field)*.5), field+max(1.,abs(field)*.5)))
+            low, high = (field-max(1.,abs(field)*.5), field+max(1.,abs(field)*.5))
             low, high = low+c['EFIELD_TOL'], high-c['EFIELD_TOL']
             add('V_SWAP', c['GAP_CM']*(low-c['STRAY_FIELD']), c['GAP_CM']*(high-c['STRAY_FIELD']))
         add('AC_PULSE_SCALE', .4, 25., True)
@@ -124,8 +117,8 @@ def physical_search_space(c, mode, vary_cavity=False):
                 span = max(abs(c[key])*2,
                            1000*(timing['transmon_pulse_duration_us']+timing['atom_pulse_duration_us']+c['GAP']))
                 add(key, -span, span)
-    if not optical_settings(c):
-        add('OMEGA', c['OMEGA']*.5, c['OMEGA']*2, True)
+    add('OMEGA', c['OMEGA']*.5, c['OMEGA']*2, True)
+    add('OMEGA_1', c['OMEGA_1']*.5, c['OMEGA_1']*2, True)
     add('GAP', 0., max(.03, c['GAP']*2))
     if any(low >= high for _, (low, high), _ in entries):
         raise ValueError('No nonempty physical-control search interval is available.')
@@ -154,9 +147,8 @@ def search_space(config, mode, vary_cavity=False):
     c = validate(config)
     if mode not in MODES:
         raise ValueError('Unsupported search output mode.')
-    if (json.loads(c.get('ATOMIC_SPECTRUM', '{}')) or optical_settings(c)
-            or (any(c[key] is not None for key in active_delay_keys(mode))
-                and not mode.startswith('Simultaneous cavity resonance:'))):
+    if (any(c[key] is not None for key in active_delay_keys(mode))
+            and not mode.startswith('Simultaneous cavity resonance:')):
         return physical_search_space(c, mode, vary_cavity)
     if vary_cavity:
         keys,bounds,current,seeds,_=search_space(c,mode,False)
@@ -196,9 +188,10 @@ def search_space(config, mode, vary_cavity=False):
         frequency_seeds += [np.r_[float(np.clip(c['FC'],lower,upper)),seed] for seed in seeds]
         return ['FC',*keys],[(lower,upper),*bounds],np.r_[float(np.clip(c['FC'],lower,upper)),current],frequency_seeds,decode
     if mode.startswith('Simultaneous cavity resonance:'):
-        keys = ['SIM_HOLD_SCALE', 'OMEGA', 'GAP']
+        keys = ['SIM_HOLD_SCALE', 'OMEGA', 'OMEGA_1', 'GAP']
         bounds = [(math.log(.4), math.log(2.5)),
-                  (math.log(c['OMEGA']*.5), math.log(c['OMEGA']*2)), (0, max(.03, c['GAP']*2))]
+                  (math.log(c['OMEGA']*.5), math.log(c['OMEGA']*2)),
+                  (math.log(c['OMEGA_1']*.5), math.log(c['OMEGA_1']*2)), (0, max(.03, c['GAP']*2))]
         if not (c['CONSTANT_FLUX'] and c['CONSTANT_FIELD']):
             keys.append('SIM_RAMP')
             bounds.append((math.log(c['SIM_RAMP']*.2), math.log(c['SIM_RAMP']*5)))
@@ -227,43 +220,43 @@ def search_space(config, mode, vary_cavity=False):
         abound = (max(abound[0],c['F_A_ZERO']-c['FC']+1e-6),abound[1])
     if (not c['CONSTANT_FLUX'] and tbound[0]>=tbound[1]) or (not c['CONSTANT_FIELD'] and abound[0]>=abound[1]):
         raise ValueError('No reachable resonance-crossing interval exists within the search bounds.')
-    keys = ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE','GAP','OMEGA']
-    bounds = [tbound,(math.log(.4),math.log(25)),abound,(math.log(.4),math.log(25)),(0.,max(.03,c['GAP']*2)),(math.log(c['OMEGA']*.5),math.log(c['OMEGA']*2))]
+    keys = ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE','GAP','OMEGA','OMEGA_1']
+    bounds = [tbound,(math.log(.4),math.log(25)),abound,(math.log(.4),math.log(25)),(0.,max(.03,c['GAP']*2)),(math.log(c['OMEGA']*.5),math.log(c['OMEGA']*2)),(math.log(c['OMEGA_1']*.5),math.log(c['OMEGA_1']*2))]
     def encode(values):
         return np.array([calculated_transmon_frequency(values,values['PHI_SWAP'])-values['FC'],
                          math.log(values['TC_PULSE_SCALE']),
                          values['F_A_ZERO']+stark*calculated_swap_field(values)**2-values['FC'],
-                         math.log(values['AC_PULSE_SCALE']), values['GAP'], math.log(values['OMEGA'])])
+                         math.log(values['AC_PULSE_SCALE']), values['GAP'], math.log(values['OMEGA']), math.log(values['OMEGA_1'])])
     def decode(x):
         phi = c['PHI_SWAP'] if c['CONSTANT_FLUX'] else resonant_flux(dict(c,FC=c['FC']+float(x[0])))
         field = calculated_swap_field(c) if c['CONSTANT_FIELD'] else math.sqrt((c['FC']+float(x[2])-c['F_A_ZERO'])/stark)
         return validate(dict(c,PHI_SWAP=phi,TC_PULSE_SCALE=math.exp(x[1]),
-                             V_SWAP=c['V_SWAP'] if c['CONSTANT_FIELD'] else c['GAP_CM']*(field-c['STRAY_FIELD']),AC_PULSE_SCALE=math.exp(x[3]),GAP=float(x[4]),OMEGA=math.exp(x[5])))
+                             V_SWAP=c['V_SWAP'] if c['CONSTANT_FIELD'] else c['GAP_CM']*(field-c['STRAY_FIELD']),AC_PULSE_SCALE=math.exp(x[3]),GAP=float(x[4]),OMEGA=math.exp(x[5]),OMEGA_1=math.exp(x[6])))
     def clip(x):
         return np.clip(x,[a for a,b in bounds],[b for a,b in bounds])
     old = derived(DEFAULTS)
     seed = np.array([old['transmon_swap_detuning_MHz'],
         math.log(DEFAULTS['TC_PULSE_SCALE']*math.sqrt(max(.1,abs(park_t)/max(1,abs(old['transmon_park_frequency_MHz']-DEFAULTS['FC']))))),
         old['atom_swap_detuning_MHz'],
-        math.log(DEFAULTS['AC_PULSE_SCALE']*math.sqrt(max(.1,abs(park_a)/150))),c['GAP'],math.log(c['OMEGA'])])
+        math.log(DEFAULTS['AC_PULSE_SCALE']*math.sqrt(max(.1,abs(park_a)/150))),c['GAP'],math.log(c['OMEGA']),math.log(c['OMEGA_1'])])
     seeds = [clip(seed),clip(encode(c)),clip([old['transmon_swap_detuning_MHz'],math.log(c['TC_PULSE_SCALE']),
-                                           old['atom_swap_detuning_MHz'],math.log(c['AC_PULSE_SCALE']),c['GAP'],math.log(c['OMEGA'])])]
+                                           old['atom_swap_detuning_MHz'],math.log(c['AC_PULSE_SCALE']),c['GAP'],math.log(c['OMEGA']),math.log(c['OMEGA_1'])])]
     if c['CONSTANT_FIELD'] or c['CONSTANT_FLUX']:
         original_decode=decode
-        positions=[i for i,key in enumerate(keys) if key not in locked_controls(c) and key not in ('GAP','OMEGA')]
+        positions=[i for i,key in enumerate(keys) if key not in locked_controls(c) and key not in ('GAP','OMEGA','OMEGA_1')]
         held=encode(c)
         active_keys=[keys[i] for i in positions]
         active_bounds=[bounds[i] for i in positions]
         # With a fixed field/flux, optimize optical timing too; never alter the field itself.
-        active_keys+=['OMEGA','GAP']
-        active_bounds+=[(math.log(c['OMEGA']*.5),math.log(c['OMEGA']*2)),(0,max(.03,c['GAP']*2))]
+        active_keys+=['OMEGA','OMEGA_1','GAP']
+        active_bounds+=[(math.log(c['OMEGA']*.5),math.log(c['OMEGA']*2)),(math.log(c['OMEGA_1']*.5),math.log(c['OMEGA_1']*2)),(0,max(.03,c['GAP']*2))]
         def compact(x):
-            return np.r_[np.asarray(x)[positions],math.log(c['OMEGA']),c['GAP']]
+            return np.r_[np.asarray(x)[positions],math.log(c['OMEGA']),math.log(c['OMEGA_1']),c['GAP']]
         active_seeds=[compact(x) for x in seeds]
         def decode_active(x):
             full=held.copy();full[positions]=x[:len(positions)]
             candidate=original_decode(full)
-            candidate.update(OMEGA=math.exp(x[-2]),GAP=float(x[-1]))
+            candidate.update(OMEGA=math.exp(x[-3]),OMEGA_1=math.exp(x[-2]),GAP=float(x[-1]))
             return validate(candidate)
         return active_keys,active_bounds,compact(held),active_seeds,decode_active
     return keys,bounds,clip(encode(c)),seeds,decode
@@ -436,7 +429,7 @@ def screen(b, mode, stage='joint'):
     import qutip as qt
     options=dict(store_states=True,atol=1e-11,rtol=1e-9,method='dop853',max_step=b.MAX_STEP,nsteps=100000)
     if not mode.startswith('Simultaneous cavity resonance:'):
-        read_tc,read_ac=pulse_intervals(b._SETTINGS,b.T_OPT+b.GAP,b.TC_DURATION,b.AC_DURATION,'read')
+        read_tc,read_ac=pulse_intervals(b._SETTINGS,max(b.T_OPT,b.T_OPT_1)+b.GAP,b.TC_DURATION,b.AC_DURATION,'read')
         separated = all(b.TC[1] <= b.AC[0]+1e-12 if direction=='write' else read_ac[1] <= read_tc[0]+1e-12
                         for direction in MODES[mode])
         if separated:
@@ -489,13 +482,13 @@ def optimize_controls(config, mode, target, directory, max_evaluations=320, eval
     from scipy.optimize import minimize, differential_evolution
     keys,bounds,current,seeds,decode=search_space(config,mode,vary_cavity)
     offset = int(keys[0] == 'FC')
-    seeded = keys[offset:offset+4] == ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE'] and len(keys) == offset+6
+    seeded = keys[offset:offset+4] == ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE'] and len(keys) == offset+7
     if seeded:
         seed = population_seed(config)
         coordinates = [calculated_transmon_frequency(seed,seed['PHI_SWAP'])-seed['FC'],
                        math.log(seed['TC_PULSE_SCALE']),
                        float(AtomicModel(seed).transition(calculated_swap_field(seed)))-seed['FC'],
-                       math.log(seed['AC_PULSE_SCALE']), seed['GAP'], math.log(seed['OMEGA'])]
+                       math.log(seed['AC_PULSE_SCALE']), seed['GAP'], math.log(seed['OMEGA']), math.log(seed['OMEGA_1'])]
         seeds.insert(0, np.array(([seed['FC']] if offset else [])+coordinates))
     cache,trace,candidates={},[],[]
     best_score,best_x=-1.,current.copy()
