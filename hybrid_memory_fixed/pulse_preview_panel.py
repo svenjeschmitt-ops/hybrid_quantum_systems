@@ -29,8 +29,9 @@ class PulsePreview:
                      state='readonly', width=7).pack(side='left', padx=5)
         ttk.Button(controls, text='Refresh', command=self.refresh_now).pack(side='right')
         ttk.Label(parent, textvariable=self.timing).grid(row=1, column=0, sticky='w', pady=(4, 0))
-        self.figure = Figure(figsize=(5, 2.6), dpi=100, layout='constrained')
-        self.axes = self.figure.subplots(2, 1, sharex=True)
+        self.figure = Figure(figsize=(5, 3.4), dpi=100, layout='constrained')
+        self.figure.get_layout_engine().set(h_pad=0.06, hspace=0.08)
+        self.axes = self.figure.subplots(3, 1, sharex=True)
         self.voltage_axis = self.axes[0].twinx()
         self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
         self.canvas.get_tk_widget().grid(row=2, column=0, sticky='nsew')
@@ -103,15 +104,19 @@ class PulsePreview:
             self.root.after_cancel(self.refresh_after)
         self.refresh_controls()
 
+    def set_axis_labels(self):
+        """Keep labels compact enough to fit beside each short subplot."""
+        for axis, text in zip(self.axes, ('Flux\nΦ/Φ₀', 'Detuning\nMHz', 'Optical\nMHz')):
+            axis.set_ylabel(text, fontsize=8, rotation=0, ha='right', va='center', labelpad=5)
+        self.voltage_axis.set_ylabel('Voltage\nV', fontsize=8, rotation=0, ha='left', va='center', labelpad=5)
+        self.voltage_axis.yaxis.set_label_position('right')
+        self.voltage_axis.yaxis.tick_right()
+
     def draw_empty(self, message):
         for axis in (*self.axes, self.voltage_axis):
             axis.clear()
-        self.axes[0].set_ylabel('Flux / Φ₀')
-        self.voltage_axis.set_ylabel('Voltage (V)')
-        self.voltage_axis.yaxis.set_label_position('right')
-        self.voltage_axis.yaxis.tick_right()
-        self.axes[1].set_ylabel('Detuning (MHz)')
-        self.axes[1].set_xlabel('Time (ns)')
+        self.set_axis_labels()
+        self.axes[2].set_xlabel('Time (ns)')
         self.axes[1].text(.5, .5, message, transform=self.axes[1].transAxes, ha='center')
         self.canvas.draw_idle()
 
@@ -122,10 +127,7 @@ class PulsePreview:
             axis.clear()
         flux_line, = self.axes[0].plot(times, data['flux'], color='tab:blue', label='Flux')
         voltage_line, = self.voltage_axis.plot(times, data['voltage'], '--', color='tab:orange', label='Voltage')
-        self.axes[0].set_ylabel('Flux / Φ₀', fontsize=8)
-        self.voltage_axis.set_ylabel('Voltage (V)', fontsize=8)
-        self.voltage_axis.yaxis.set_label_position('right')
-        self.voltage_axis.yaxis.tick_right()
+        self.set_axis_labels()
         self.axes[0].legend(handles=[flux_line, voltage_line], loc='upper right', fontsize=7, ncol=2)
         for name in ('preparation', 'mapping'):
             start, end = data['stages'][name]
@@ -135,9 +137,11 @@ class PulsePreview:
         self.axes[1].plot(times, data['transmon_detuning'], label='Transmon', color='tab:blue')
         self.axes[1].plot(times, data['atom_detuning'], '--', label='Atom', color='tab:orange')
         self.axes[1].axhline(0, color='gray', lw=.6)
-        self.axes[1].set_ylabel('Detuning (MHz)', fontsize=8)
         self.axes[1].legend(loc='upper right', ncol=2, fontsize=7)
-        self.axes[1].set_xlabel('Time (ns)', fontsize=8)
+        self.axes[2].plot(times, data['optical0'], label='h0 ↔ r0', color='tab:green')
+        self.axes[2].plot(times, data['optical1'], '--', label='h1 ↔ r1', color='tab:purple')
+        self.axes[2].legend(loc='upper right', ncol=2, fontsize=7)
+        self.axes[2].set_xlabel('Time (ns)', fontsize=8)
         self.cursors = []
         for axis in self.axes:
             axis.grid(alpha=.18)
@@ -179,4 +183,3 @@ class PulsePreview:
         self.closed = True
         if self.refresh_after is not None:
             self.root.after_cancel(self.refresh_after)
-        self.figure.clear()

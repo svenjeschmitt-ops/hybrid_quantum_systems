@@ -13,6 +13,8 @@ import argparse
 import os
 import sys
 import json
+from panel_lifetime import watch_panel_parent
+watch_panel_parent()
 from functools import lru_cache
 import numpy as np
 import matplotlib
@@ -22,14 +24,14 @@ import qutip as qt
 from pathlib import Path
 from simulation_output import trace, write_report
 import tolerance_bands
-from multilevel import parse_manifold
 from parked_solver import ParkedSolver
 from population_labels import resolved_population_labels, population_legend
 import simulation_progress as progress
 import simulation_stop as stopping
 from dissipation import collapse_operators, snapshot
 from atomic_model import AtomicModel
-from optical_model import build_optics
+from optical_model import build_optics, optical_detuning
+from pulse_shapes import pulse_window, parse_shapes
 
 _ASSISTANT_OUTPUT = None
 
@@ -57,6 +59,7 @@ if _config_args.config:
 from hybrid_settings import validate, coupling_strengths, derived, calculated_transmon_frequency, calculated_swap_field, transmon_operating_point, effective_controls, pulse_intervals
 _SETTINGS = validate(_SETTINGS)
 _CONTROL_SETTINGS = effective_controls(_SETTINGS)
+_PULSE_SHAPES = parse_shapes(_SETTINGS["PULSE_SHAPES"])
 _COUPLINGS = coupling_strengths(_SETTINGS)
 _ATOMIC_MODEL = AtomicModel(_SETTINGS)
 _OPTICAL_SPEC = {}
@@ -132,6 +135,18 @@ def transmon_frequency(phi):
 PREP = (0.0, T_OPT)
 TC_DURATION = _SETTINGS["TC_PULSE_SCALE"] * (2 * RAMP + np.pi / (2 * G_TC))
 AC_DURATION = _SETTINGS["AC_PULSE_SCALE"] * (2 * RAMP + np.pi / (2 * G_AC))
+# Resolve seeded sample intervals and narrow Gaussian features even when the
+# user-specified maximum step is larger than their time scale.
+_durations = {'optical0': T_OPT, 'optical1': T_OPT_1, 'flux': TC_DURATION, 'voltage': AC_DURATION}
+_sim_min_duration = 2*_SETTINGS['SIM_RAMP']*_SETTINGS['SIM_HOLD_SCALE']
+for _channel, _spec in _PULSE_SHAPES.items():
+    _duration = _durations[_channel]
+    if _channel in ('flux', 'voltage') and _sim_min_duration > 0:
+        _duration = min(_duration, _sim_min_duration)
+    if _spec['noise']:
+        MAX_STEP = min(MAX_STEP, _duration/128)
+    for _, _, _width in _spec['gaussians']:
+        MAX_STEP = min(MAX_STEP, _duration*_width/4)
 TC, AC = pulse_intervals(_SETTINGS, PREP[1]+GAP, TC_DURATION, AC_DURATION)
 EXCHANGE_END = max(TC[1], AC[1])
 MAP0 = (EXCHANGE_END + GAP, EXCHANGE_END + GAP + T_OPT)
@@ -149,62 +164,54 @@ def smooth_window(t, start, end):
         return 0.0
     return float(np.sin(np.pi * (t - start) / (end - start))**2)
 
+def shaped_window(t, start, end, channel):
+    return pulse_window(t, start, end, _PULSE_SHAPES, channel)
+
+
 def optical_envelope(t, start, end, arm=0):
-    if start < t < end:
-        return (OMEGA if arm == 0 else OMEGA_1) * np.sin(np.pi * (t - start) / (end - start))**2
-    return 0.0
+    return (OMEGA if arm == 0 else OMEGA_1) * shaped_window(t, start, end, f'optical{arm}')
+
 
 def flux(t):
-    return PHI_PARK + (PHI_SWAP - PHI_PARK) * smooth_window(t, *TC) + TOLERANCE_OFFSETS["FLUX"]
+    return PHI_PARK + (PHI_SWAP - PHI_PARK) * shaped_window(t, *TC, 'flux') + TOLERANCE_OFFSETS["FLUX"]
+
 
 def electrode_voltage(t):
-    # E = V/d + E_stray; park voltage compensates the assumed static stray field.
-    desired_field = E_PARK + (E_SWAP - E_PARK) * smooth_window(t, *AC)
+    desired_field = E_PARK + (E_SWAP - E_PARK) * shaped_window(t, *AC, 'voltage')
     return GAP_CM * (desired_field - STRAY_FIELD)
 
 def electric_field(t):
     return electrode_voltage(t) / GAP_CM + STRAY_FIELD + TOLERANCE_OFFSETS["EFIELD"]
 
-# Hilbert space: weakly anharmonic transmon, truncated cavity, selected atomic levels.
+# Hilbert space: two-state transmon, zero/one-photon cavity, six-state atom.
 # Basis: h0, h1, r0, r1, loss, wrong-Rydberg.
-NC = parameter("NC", 3)
-NT = _SETTINGS["NT"]
-EXTRA_LEVELS = parse_manifold(_SETTINGS["RYDBERG_MANIFOLD"])
-NA = 6 + len(EXTRA_LEVELS) + (2 if _OPTICAL_SPEC.get("mode") == "explicit" else 0)
+NC = 2
+NT = 2
+EXTRA_LEVELS = []
+NA = 6
 g, e = qt.basis(NT, 0), qt.basis(NT, 1)
 h0, h1, r0, r1, lost, wrong = [qt.basis(NA, j) for j in range(6)]
 ATOM_STATES = dict(zip(("h0", "h1", "r0", "r1", "lost", "wrong"),
                        (h0, h1, r0, r1, lost, wrong)))
-ATOM_STATES.update({level["label"]: qt.basis(NA, 6+i)
-                    for i, level in enumerate(EXTRA_LEVELS)})
-if _OPTICAL_SPEC.get("mode") == "explicit":
-    ATOM_STATES.update({f"optical_p{arm}": qt.basis(NA, 6+len(EXTRA_LEVELS)+arm)
-                        for arm in (0, 1)})
 IT, IC, IA = qt.qeye(NT), qt.qeye(NC), qt.qeye(NA)
 
 def A(target, source):
     return qt.tensor(IT, IC, target * source.dag())
 
-# Oscillator matrix elements: <j-1|b|j> = sqrt(j).
+# Two-level lowering operator.
 sm = qt.tensor(qt.destroy(NT), IC, IA)
 Nt = sm.dag() * sm
-H_anharm = -np.pi * EC * Nt * (Nt - qt.tensor(IT, IC, IA))
+H_anharm = 0 * Nt
 Ptransmon_leakage = qt.tensor(IT - g.proj() - e.proj(), IC, IA)
 a = qt.tensor(IT, qt.destroy(NC), IA)
 Pe = qt.tensor(e.proj(), IC, IA)
 n = a.dag() * a
 Ph0, Ph1, Pr0, Pr1, Plost = [A(s, s) for s in (h0, h1, r0, r1, lost)]
 Pwrong_base = A(wrong, wrong)
-Pextra = sum((A(ATOM_STATES[x["label"]], ATOM_STATES[x["label"]])
-              for x in EXTRA_LEVELS), 0 * Pwrong_base)
-Pwrong = Pwrong_base + Pextra
+Pextra = 0 * Pwrong_base
+Pwrong = Pwrong_base
 Zt = 2 * Nt - qt.tensor(IT, IC, IA)
-# Extend the phenomenological Rydberg-pair dephasing to added branch states.
-# The original wrong level retains its existing dephasing convention.
 Zr = Pr1 - Pr0
-for level in EXTRA_LEVELS:
-    state = ATOM_STATES[level["label"]]
-    Zr += (2*level["branch"]-1) * A(state, state)
 Zh = Ph1 - Ph0
 
 
@@ -220,13 +227,7 @@ def atom_detuning_MHz(field, offsets=True):
 
 
 def extra_atomic_terms(field):
-    terms = []
-    for level in EXTRA_LEVELS:
-        state = ATOM_STATES[level["label"]]
-        def energy(t, name=level["label"]):
-            return TWOPI*atomic_energy_MHz(name, field(t))
-        terms.append([A(state, state), energy])
-    return terms
+    return []
 
 
 def multilevel_metrics(states):
@@ -236,13 +237,8 @@ def multilevel_metrics(states):
     ops = {"transmon_leakage": Ptransmon_leakage,
            "atom_unwanted_population": Pwrong,
            "atom_neighbor_wrong": Pwrong_base,
-           **({"optical_intermediate_population": sum((A(ATOM_STATES[f"optical_p{arm}"], ATOM_STATES[f"optical_p{arm}"]) for arm in (0, 1)), 0*Pr0),
-               **{f"optical_intermediate_{arm}": A(ATOM_STATES[f"optical_p{arm}"], ATOM_STATES[f"optical_p{arm}"]) for arm in (0, 1)}}
-              if _OPTICAL_SPEC.get("mode") == "explicit" else {}),
            **{f"transmon_level_{j}": qt.tensor(qt.basis(NT, j).proj(), IC, IA)
-              for j in range(NT)},
-           **{f"atom_neighbor_{x['label']}": A(ATOM_STATES[x["label"]], ATOM_STATES[x["label"]])
-              for x in EXTRA_LEVELS}}
+              for j in range(NT)}}
     return {name: np.real(qt.expect(op, states)) for name, op in ops.items()}
 
 
@@ -283,8 +279,8 @@ def prep_conj(t):
 
 # Mapping occurs at the compensated park field. The optical carrier
 # phases below keep each effective optical arm resonant in this frame.
-D_R0_PARK = TWOPI * atomic_energy_MHz("r0", E_PARK, offsets=False)
-D_R1_PARK = TWOPI * atomic_energy_MHz("r1", E_PARK, offsets=False)
+D_R0_PARK = TWOPI * (atomic_energy_MHz("r0", E_PARK, offsets=False) + optical_detuning(_SETTINGS, 0, E_PARK))
+D_R1_PARK = TWOPI * (atomic_energy_MHz("r1", E_PARK, offsets=False) + optical_detuning(_SETTINGS, 1, E_PARK))
 
 def map0_coeff(t):
     return 0.5 * optical_envelope(t, *MAP0) * np.exp(
@@ -304,26 +300,15 @@ def map1_conj(t):
 
 # Crucial change: both physical couplings remain present at ALL times.
 Rplus = A(r1, r0)
-for level in EXTRA_LEVELS:
-    for source, strength in level["cavity_from"].items():
-        Rplus += strength * A(ATOM_STATES[level["label"]], ATOM_STATES[source])
 H_coupling = G_TC * (a.dag() * sm + a * sm.dag()) + G_AC * (
     a * Rplus + a.dag() * Rplus.dag()
 )
 # The same laser drives the desired and undesired optical transitions.
 # Hermitian-conjugate terms also allow stimulated return from the wrong state.
 # The reverse r0->h0 mapping pulse can therefore excite h0->wrong as well.
-# Neighboring cavity transitions are included when specified in the manifold.
 Bprep = A(r0, h0) + REL_WRONG_DIPOLE * A(wrong, h0)
 Bmap0 = A(h0, r0) + REL_WRONG_DIPOLE * A(h0, wrong)
 Bmap1 = A(h1, r1)
-for level in EXTRA_LEVELS:
-    state = ATOM_STATES[level["label"]]
-    if level["branch"] == 0:
-        Bprep += level["optical_relative"] * A(state, h0)
-        Bmap0 += level["optical_relative"] * A(h0, state)
-    else:
-        Bmap1 += level["optical_relative"] * A(h1, state)
 def coupling_terms(field, transmon_coupling=G_TC):
     """Keep the constant cavity couplings active."""
     if transmon_coupling == G_TC:
@@ -536,7 +521,7 @@ def main(check=False, save=False):
     print(f"Wrong-state population after preparation: {pops[7, prep_index]:.6e}")
     print(f"Peak wrong-state population (sampled): {pops[7].max():.6e}")
     print(f"Final wrong-state population: {pops[7, -1]:.6e}")
-    print(f"Multilevel dimensions: transmon={NT}, cavity={NC}, atom={NA}")
+    print(f"Model dimensions: transmon={NT}, cavity={NC}, atom={NA}")
     print(f"Leakage diagnostics: {multilevel_summary(states)}")
     print(f"Mapping joint transfer fidelity: {fidelity[mapping_index]:.6f}")
     print(f"Final joint transfer fidelity: {fidelity[-1]:.6f}")
@@ -816,10 +801,10 @@ def retrieval_model(source="hyperfine"):
     cleanup = (exchange_end + GAP, exchange_end + GAP + T_OPT)
 
     def flux_read(t):
-        return PHI_PARK + (PHI_SWAP - PHI_PARK) * smooth_window(t, *tc) + TOLERANCE_OFFSETS["FLUX"]
+        return PHI_PARK + (PHI_SWAP - PHI_PARK) * shaped_window(t, *tc, 'flux') + TOLERANCE_OFFSETS["FLUX"]
 
     def voltage_read(t):
-        field = E_PARK + (E_SWAP - E_PARK) * smooth_window(t, *ac)
+        field = E_PARK + (E_SWAP - E_PARK) * shaped_window(t, *ac, 'voltage')
         return GAP_CM * (field - STRAY_FIELD)
 
     def field_read(t):

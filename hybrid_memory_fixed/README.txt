@@ -1,73 +1,15 @@
-Multilevel basis (updated defaults)
-==================================
-The transmon now uses NT=3 levels by default (g,e,f), adjustable in Numerics.
-The atomic basis now contains h0,h1,r0,r1,loss,wrong,wrong_upper by default.
-The existing logical qubits remain g/e and h0/h1; all joint fidelities remain
-unconditional, so population outside the target counts as error.
+Fixed simulation basis
+======================
+The simulation uses a fixed two-state transmon (g,e), two cavity states
+(zero and one photon), and six atomic states: h0, h1, r0, r1, loss, and one unwanted
+Rydberg state. Higher transmon levels and further atomic leakage channels are
+not represented; their effects cannot be assessed with this model. The cavity
+cannot hold two photons. The solver step remains adjustable for convergence.
 
-Transmon Hamiltonian in angular units:
-H_T/hbar = delta_T(t)*N - pi*EC*N*(N-1), with EC in MHz.
-Adjacent transition frequencies are f01-j*EC, and cavity exchange/relaxation
-use the truncated oscillator lowering operator with sqrt(j) matrix elements.
-Pe still means ONLY |e><e|. Ptransmon_leakage sums levels j>=2.
-Number-dependent pure dephasing preserves the original g/e Tphi and scales
-higher-level coherences with squared level separation. This is a weakly
-anharmonic approximation, not exact diagonalization of the Josephson circuit.
-Large NT or flux settings outside the transmon regime need a different model.
-
-RYDBERG_MANIFOLD accepts a JSON array (in a settings file) or its JSON text
-(in the Numerics field). Each object specifies exactly:
-  label: unique identifier, distinct from the six original states
-  branch: 0 for a lower/r0-like state; 1 for an upper/r1-like state
-  offset_MHz: zero-field energy offset from r0 (branch 0) or r1 (branch 1)
-  stark_MHz_per_Vcm2: coefficient K in shift/h = K*E^2, E in V/cm
-  lifetime_us: positive lifetime, decaying into the existing loss sink
-  optical_relative: signed real amplitude relative to the h0 optical arm
-                    (branch 0) or the h1 arm (branch 1)
-  cavity_from: for branch 1, a mapping from lower-state labels to signed
-               real amplitudes relative to G_AC; branch 0 uses {}
-Lower labels can be r0, wrong, or other added branch-0 states. Couplings
-are Hermitian and remain active throughout writing, reading, and storage.
-Each neighbor has its own Stark energy, optical excitation, and decay.
-Added states also participate in the existing phenomenological pair dephasing.
-The original wrong level retains its original dephasing convention.
-Wrong-Rydberg plots now sum the original wrong level and every added neighbor.
-Assistant reports include individual transmon/neighbor populations and total
-transmon leakage, with sampled peak/final summaries. Transfer and sweep plots
-show wrong, each added neighbor, transmon g, and each included transmon level
-above e separately. The sum of wrong and all neighbors remains in numerical
-reports and summary metrics; its redundant curve is omitted from the plots.
-
-The default wrong_upper has an illustrative +1320 MHz offset, not a measured
-partner of the original wrong state. NO atomic species, magnetic sublevels,
-selection rules or Stark mixing are inferred. Replace level energies, dipoles,
-Stark coefficients and lifetimes with one consistent physical level scheme.
-Optical intermediate states and a full Stark Hamiltonian remain outside this
-selected-level model. The old fidelity calibration below predates the expanded
-basis and must not be interpreted as validation of every added level scheme.
-
-Example (all extra atomic values are illustrative):
-python hybrid_memory_fixed/backend.py --run --config hybrid_memory_fixed/multilevel_example.json --no-show
-Or load multilevel_example.json from the panel. The example uses four transmon
-levels and nine atomic states. Existing settings missing NT/manifold use the
-new defaults. Additional Rydberg levels are configured in settings files, not
-through a panel text field. Loading and saving settings preserves the manifold.
-To recover the original basis, load {"NT": 2, "RYDBERG_MANIFOLD": []}.
-
-For basis convergence, compare NT=2,3,4,... at fixed control settings, then
-successively add physically relevant atomic neighbors. Compare unconditional
-joint fidelity, peak/final leakage and solver-step convergence. The current
-rotating-wave optical/exchange protocol conserves an excitation count including
-h1 and upper-branch atomic levels. For a logical input with at most one
-excitation, higher transmon states can remain exactly unpopulated. Merely
-adding them does not create leakage; thermal preparation, extra drives or
-terms breaking that conservation would be additional physical assumptions.
-
-Parked storage uses exact connected blocks of the constant Lindblad generator,
-without dense full-Liouvillian diagonalization, postselection or renormalization.
-This keeps the larger basis practical while preserving population and coherence.
-Checks: python -m unittest discover -s hybrid_memory_fixed -p 'test_multilevel.py'
-Transmon basis model reference: https://arxiv.org/abs/cond-mat/0703002
+Older settings with NC=2, NT=2 and an empty RYDBERG_MANIFOLD remain accepted.
+Settings requesting more cavity states, transmon levels or atomic states are rejected to
+avoid silently changing their physical model; remove those entries to use the
+fixed basis. Previous expanded-basis results are not directly comparable.
 
 Previous workflow notes and original six-state calibration follow.
 ----------------------------------------------------------------
@@ -679,21 +621,11 @@ Physical Hamiltonian: see PHYSICAL_HAMILTONIAN.md and physical_hamiltonian_examp
 The atomic model uses quadratic Stark shifts and constant coupling. The main
 panel sets separate effective optical Rabi frequencies for h0/r0 and h1/r1.
 Their sin-squared pulses have separate durations and carrier frequencies. The
-model does not calculate intermediate-state light shifts or scattering.
-
-Panel model editors
--------------------
-Use Configure beside extra Rydberg levels to edit these models with labeled fields and tables.
-Add, edit, and remove table rows, or paste tab-separated rows from a spreadsheet
-in the displayed column order (without headers). Apply checks the complete model
-before updating the panel; Cancel discards changes.
-
-The detailed optical model derives the effective Rabi frequency, shown read-only
-on the panel while enabled. Disable it to return to the manual frequency.
-Atomic tables and laser parameters require measured or calculated physical data;
-the editor does not invent them. Existing JSON settings files still load and save
-through the panel, with no manual JSON editing required.
-
+panel accepts measured zero-field transition frequencies and fixed effective
+two-photon mapping frequencies for each arm, in MHz. Existing Stark coefficients
+shift the transition with electric field. Set both frequencies for an arm to
+auto to use the nominal transition instead. The model does not calculate
+intermediate-state light shifts or scattering.
 
 Phase-sensitive assistant search
 -------------------------------
@@ -715,3 +647,25 @@ unchanged pulses during timing searches. Overlapping pulses use the direct
 solver. Standard figure calculations remain the independent full-model
 validation. Parked Lindblad blocks up to dimension 256 use dense exponentials,
 which avoid the measured sparse exponential-action bottleneck at large detuning.
+
+
+Detailed pulse shapes
+---------------------
+Use Edit pulse shapes on Pulses & input to customize optical arm 0, optical
+arm 1, transmon flux and atomic voltage separately. Add, update, or remove
+peaks in the table, or load the two-peak example as a starting point. Each is a sin² window
+multiplied by a baseline plus any Gaussian peaks and a seeded sampled noise
+waveform. Gaussian centers and widths are fractions of pulse duration; their
+amplitudes and the noise amplitude are relative to the corresponding nominal
+control amplitude. Negative values reverse the signed envelope or excursion.
+The 65 noise samples are linearly interpolated and tapered to zero at the pulse
+boundaries. A seed makes a channel repeatable; each pulse of a channel uses the
+same normalized waveform. This is a fixed waveform imperfection, not a stochastic
+bath or a new noise realization per run.
+
+Shapes are not renormalized: the peak and area change, and nominal pi-pulse and
+swap timing are not automatically recalibrated. Shapes apply in write, read,
+and simultaneous modes; held-constant flux or voltage bypasses its pulse shape.
+The solver may reduce its maximum step to resolve narrow peaks or noise samples.
+Compare further solver-step reductions for quantitative convergence.
+

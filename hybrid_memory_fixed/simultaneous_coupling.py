@@ -56,12 +56,12 @@ def model(b, include_storage=True, direction="write"):
     def flux(t):
         if constant_flux:
             return info['interaction_flux']+b.TOLERANCE_OFFSETS['FLUX']
-        return b.PHI_PARK+(info['interaction_flux']-b.PHI_PARK)*b.smooth_window(t, start, end)+b.TOLERANCE_OFFSETS['FLUX']
+        return b.PHI_PARK+(info['interaction_flux']-b.PHI_PARK)*b.shaped_window(t, start, end, 'flux')+b.TOLERANCE_OFFSETS['FLUX']
 
     def field(t):
         if constant_field:
             return info['interaction_field_V_per_cm']+b.TOLERANCE_OFFSETS['EFIELD']
-        return b.E_PARK+(info['interaction_field_V_per_cm']-b.E_PARK)*b.smooth_window(t, start, end)+b.TOLERANCE_OFFSETS['EFIELD']
+        return b.E_PARK+(info['interaction_field_V_per_cm']-b.E_PARK)*b.shaped_window(t, start, end, 'voltage')+b.TOLERANCE_OFFSETS['EFIELD']
 
     def voltage(t):
         return c['V_SWAP'] if constant_field else b.GAP_CM*(field(t)-b.TOLERANCE_OFFSETS['EFIELD']-b.STRAY_FIELD)

@@ -1,9 +1,10 @@
 """Shared parameter definitions and mathematical checks for the hybrid model."""
 import json
 import math
-from multilevel import DEFAULT_MANIFOLD, parse_manifold
 from pathlib import Path
 from atomic_model import AtomicModel
+from optical_model import optical_detuning
+from pulse_shapes import parse_shapes
 
 # SI constants (e and h are exact; a0 is the Bohr radius in metres).
 ELEMENTARY_CHARGE = 1.602176634e-19
@@ -28,6 +29,8 @@ FIELDS = [
 ("Coupling parameters","G_TC_MHZ","Transmon-cavity coupling g_TC / (2 pi)","MHz",11.023791568183459,"positive"),
 ("Coupling parameters","G_AC_MHZ","Atom-cavity coupling g_AC / (2 pi)","MHz",10.236358418015183,"positive"),
 ("Atom and electrodes","F_A_ZERO","Zero-field Rydberg transition","MHz",5150.0,"positive"),
+("Atom and electrodes","OPTICAL_TRANSITION_0","h0 ↔ r0 transition at zero field","MHz or auto","auto","optional_optical_frequency"),
+("Atom and electrodes","OPTICAL_TRANSITION_1","h1 ↔ r1 transition at zero field","MHz or auto","auto","optional_optical_frequency"),
 ("Atom and electrodes","K_R0","Lower Rydberg Stark coefficient","MHz/(V/cm)^2",-2.0,"free"),
 ("Atom and electrodes","K_R1","Upper Rydberg Stark coefficient","MHz/(V/cm)^2",-12.0,"free"),
 ("Atom and electrodes","K_WRONG","Unwanted-level Stark coefficient","MHz/(V/cm)^2",-2.0,"free"),
@@ -48,6 +51,9 @@ FIELDS = [
 ("Loss and coherence","TPHI_H","Hyperfine pure dephasing time","us",100000.0,"positive"),
 ("Pulses and input state","OMEGA","h0 ↔ r0 peak Rabi frequency / 2pi","MHz",100.0,"positive"),
 ("Pulses and input state","OMEGA_1","h1 ↔ r1 peak Rabi frequency / 2pi","MHz",100.0,"positive"),
+("Pulses and input state","OPTICAL_MAPPING_0","h0 ↔ r0 effective mapping frequency","MHz or auto","auto","optional_optical_frequency"),
+("Pulses and input state","OPTICAL_MAPPING_1","h1 ↔ r1 effective mapping frequency","MHz or auto","auto","optional_optical_frequency"),
+("Pulses and input state","PULSE_SHAPES","Detailed pulse shapes","", "{}", "pulse_shapes"),
 ("Pulses and input state","RAMP","Extra duration per pulse half","us",0.0005,"positive"),
 ("Pulses and input state","TC_PULSE_SCALE","Transmon pulse duration multiplier","dimensionless",9.664304506350172,"positive"),
 ("Pulses and input state","AC_PULSE_SCALE","Atomic pulse duration multiplier","dimensionless",3.3585450169623496,"positive"),
@@ -65,9 +71,6 @@ FIELDS = [
 ("Simultaneous resonance","SIM_HOLD_SCALE","Simultaneous pulse duration multiplier","dimensionless",1.0,"positive"),
 ("Simultaneous resonance","SIM_RAMP","Simultaneous pulse ramp reference","us",0.0005,"positive"),
 ("Numerics","MAX_STEP","Maximum solver time step","us",0.0005,"positive"),
-("Numerics","NT","Number of transmon levels","integer",3,"transmon_integer"),
-("Numerics","RYDBERG_MANIFOLD","Additional Rydberg levels","JSON array",DEFAULT_MANIFOLD,"manifold"),
-("Numerics","NC","Number of cavity Fock states","integer",3,"integer"),
 ]
 DEFAULTS = {key: default for _,key,_,_,default,_ in FIELDS}
 PULSE_DELAY_KEYS = ("WRITE_PULSE_DELAY_NS", "READ_PULSE_DELAY_NS")
@@ -201,17 +204,57 @@ def validate(values):
         raise ValueError("OPTICAL_SCHEME has been removed; remove its nonempty configuration and set both effective optical frequencies before running.")
     if "OMEGA" in values and "OMEGA_1" not in values:
         values["OMEGA_1"] = values["OMEGA"]
+    # Preserve explicit legacy mapping carriers; do not silently discard auto-mode offsets.
+    for arm in (0, 1):
+        legacy_offset = values.pop(f"OPTICAL_DETUNING_{arm}", 0)
+        try:
+            legacy_offset = float(legacy_offset)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid legacy optical offset for arm {arm}.") from None
+        if not math.isfinite(legacy_offset):
+            raise ValueError(f"Invalid legacy optical offset for arm {arm}.")
+        if legacy_offset:
+            mapping_key = f"OPTICAL_MAPPING_{arm}"
+            mapping = values.get(mapping_key)
+            if mapping is None or str(mapping).strip().lower() in ("auto", "none"):
+                raise ValueError(f"Legacy optical offset for arm {arm} requires explicit transition and mapping frequencies; enter them to preserve the intended carrier.")
+            try:
+                values[mapping_key] = float(mapping) + legacy_offset
+            except (TypeError, ValueError):
+                raise ValueError(f"Invalid mapping frequency for arm {arm}.") from None
+    legacy_nc = values.pop("NC", 2)
+    try:
+        legacy_nc = float(legacy_nc)
+    except (TypeError, ValueError):
+        raise ValueError("Invalid legacy cavity state count.") from None
+    if legacy_nc != 2:
+        raise ValueError("This model now has exactly 2 cavity states (0 and 1 photons); remove the previous NC setting to use the fixed model.")
+    # Expanded bases cannot be represented in the fixed two-by-six model.
+    legacy_nt = values.pop("NT", 2)
+    try:
+        legacy_nt = float(legacy_nt)
+    except (TypeError, ValueError):
+        raise ValueError("Invalid legacy transmon level count.") from None
+    if legacy_nt != 2:
+        raise ValueError("This model now has exactly 2 transmon levels; remove the previous NT setting to use the fixed model.")
+    legacy_levels = values.pop("RYDBERG_MANIFOLD", [])
+    try:
+        legacy_levels = json.loads(legacy_levels) if isinstance(legacy_levels, str) else legacy_levels
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid legacy Rydberg manifold.") from exc
+    if legacy_levels != []:
+        raise ValueError("Additional Rydberg levels have been removed; remove the previous RYDBERG_MANIFOLD setting to use the fixed six-state atom.")
     unknown = set(values) - set(DEFAULTS)
     if unknown:
         raise ValueError("Unknown settings: " + ", ".join(sorted(unknown)))
     config = dict(DEFAULTS)
     config.update(values)
     for _,key,label,_,_,rule in FIELDS:
-        if rule == "optional_delay" and (config[key] is None or str(config[key]).strip().lower() == "auto"):
-            config[key] = None
+        if rule == "pulse_shapes":
+            config[key] = json.dumps(parse_shapes(config[key]), sort_keys=True)
             continue
-        if rule == "manifold":
-            config[key] = json.dumps(parse_manifold(config[key]), sort_keys=True)
+        if rule in ("optional_delay", "optional_optical_frequency") and (config[key] is None or str(config[key]).strip().lower() in ("auto", "none")):
+            config[key] = None
             continue
         try:
             value = float(config[key])
@@ -219,7 +262,7 @@ def validate(values):
             raise ValueError(label + " must be a number.") from None
         if not math.isfinite(value):
             raise ValueError(label + " must be finite.")
-        if rule == "positive" and value <= 0:
+        if rule in ("positive", "optional_optical_frequency") and value <= 0:
             raise ValueError(label + " must be greater than zero.")
         if rule == "nonnegative" and value < 0:
             raise ValueError(label + " cannot be negative.")
@@ -227,15 +270,12 @@ def validate(values):
             if value not in (0, 1):
                 raise ValueError(label + " must be 0 (calculated) or 1 (manual).")
             value = int(value)
-        if rule == "transmon_integer":
-            if value != int(value) or value < 2:
-                raise ValueError("Use at least 2 transmon levels (an integer).")
-            value = int(value)
-        if rule == "integer":
-            if value != int(value) or value < 3:
-                raise ValueError("Use at least 3 cavity Fock states (an integer).")
-            value = int(value)
         config[key] = value
+    for arm in (0, 1):
+        transition = config[f"OPTICAL_TRANSITION_{arm}"]
+        mapping = config[f"OPTICAL_MAPPING_{arm}"]
+        if (transition is None) != (mapping is None):
+            raise ValueError(f"For optical arm {arm}, enter both the zero-field transition and mapping frequencies, or set both to auto.")
     if not 0 <= config["ASYMMETRY"] < 1:
         raise ValueError("SQUID asymmetry must be between 0 (inclusive) and 1 (exclusive).")
     if config["BETA"] > 1:
@@ -252,9 +292,6 @@ def validate(values):
     for label, value in coupling_strengths(config).items():
         if not math.isfinite(value) or value <= 0:
             raise ValueError(label + " must be finite and greater than zero for swap timing.")
-    for phi in (config["PHI_PARK"], config["PHI_SWAP"]):
-        if calculated_transmon_frequency(config, phi) - config["EC"]*(config["NT"]-2) <= 0:
-            raise ValueError("Transmon truncation exceeds the validity of the weakly anharmonic ladder.")
     return config
 
 
@@ -308,6 +345,8 @@ def derived(config):
             operating_point["transmon_interaction_frequency_MHz"] - c["FC"]),
         "atom_swap_detuning_MHz": float(AtomicModel(c).transition(swap_field))-c["FC"],
         "park_voltage_V": c["GAP_CM"]*(c["E_PARK"]-c["STRAY_FIELD"]),
+        "optical_detuning_0_MHz": optical_detuning(c, 0, c["E_PARK"]),
+        "optical_detuning_1_MHz": optical_detuning(c, 1, c["E_PARK"]),
         "optical_pi_pulse_us": 1/c["OMEGA"],
         "optical_pi_pulse_1_us": 1/c["OMEGA_1"],
         "transmon_swap_frequency_MHz": 2*couplings["transmon_coupling_MHz"],

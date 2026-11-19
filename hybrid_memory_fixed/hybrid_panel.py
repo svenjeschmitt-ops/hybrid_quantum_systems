@@ -37,7 +37,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from hybrid_settings import FIELDS, DEFAULTS, PULSE_DELAY_KEYS, validate, derived
-from model_editors import TITLES as MODEL_TITLES, add_model_control
 from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
 from assistant_proposals import parse_proposal, prepare_application
@@ -93,6 +92,11 @@ PARAMETER_SYMBOLS = {
     "TPHI_H": r"T_{\phi,H}",
     "OMEGA": r"\Omega_{0}/(2\pi)",
     "OMEGA_1": r"\Omega_{1}/(2\pi)",
+    "PULSE_SHAPES": r"w_j(t)",
+    "OPTICAL_TRANSITION_0": r"f_{\mathrm{at},0}(0)",
+    "OPTICAL_MAPPING_0": r"f_{\mathrm{map},0}",
+    "OPTICAL_TRANSITION_1": r"f_{\mathrm{at},1}(0)",
+    "OPTICAL_MAPPING_1": r"f_{\mathrm{map},1}",
     "RAMP": r"T_{\mathrm{ramp}}",
     "TC_PULSE_SCALE": r"s_{TC}",
     "AC_PULSE_SCALE": r"s_{AC}",
@@ -101,9 +105,6 @@ PARAMETER_SYMBOLS = {
     "INPUT_THETA": r"\vartheta",
     "INPUT_PHI": r"\varphi",
     "MAX_STEP": r"\Delta t_{\max}",
-    "NC": r"N_c",
-    "NT": r"N_T",
-    "RYDBERG_MANIFOLD": r"\mathcal{R}_{extra}",
     "FC_TOL": r"\epsilon_c",
     "FT_TOL": r"\epsilon_T",
     "FA_TOL": r"\epsilon_A",
@@ -145,7 +146,7 @@ SECTION_EQUATIONS = {
             r"$G=\sqrt{g_{TC}^2+g_{AC}^2},\qquad T_{\mathrm{sim}}=s_{\mathrm{sim}}(2T_{r,\mathrm{eff}}+\pi/G)$",
             r"$P_{\max}=4g_{TC}^2g_{AC}^2/(g_{TC}^2+g_{AC}^2)^2$",
         ),
-        'Pulsed controls reach their resonant targets at the shared midpoint and return to park. Constant controls use the entered values and may be detuned. T_r,eff = 0 when both controls are constant; otherwise it is SIM_RAMP. Couplings are reference magnitudes at the interaction point. The ideal P_max assumes constant resonance, one excitation, no loss and only the desired three-state chain; rounded pulses and extra levels change transfer. Storage follows writing and precedes retrieval.',
+        'Pulsed controls reach their resonant targets at the shared midpoint and return to park. Constant controls use the entered values and may be detuned. T_r,eff = 0 when both controls are constant; otherwise it is SIM_RAMP. Couplings are reference magnitudes at the interaction point. The ideal P_max assumes constant resonance, one excitation, no loss and only the desired three-state chain; rounded pulses and unwanted atomic excitation change transfer. Storage follows writing and precedes retrieval.',
     ),
     "Cavity and transmon": (
         (
@@ -154,9 +155,9 @@ SECTION_EQUATIONS = {
             r"$f_{T,\mathrm{int}}=f_T(\phi_{\mathrm{swap}}),\qquad f_{T,\mathrm{park}}=f_T(\phi_{\mathrm{park}})$",
             r"$\Delta_{T,\mathrm{int}}=2\pi(f_{T,\mathrm{int}}-f_c),\qquad \mathrm{resonance}:\ f_{T,\mathrm{int}}=f_c$",
             r"$\phi(t)=\phi_{\mathrm{park}}+[\phi_{\mathrm{swap}}-\phi_{\mathrm{park}}]w_{TC}(t)$",
-            r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)\hat n_T-\pi\epsilon_C\hat n_T(\hat n_T-1)$",
+            r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)\hat n_T$",
         ),
-        'Energies divided by h: MHz. d: SQUID asymmetry. n̂_T = b†b is the excitation operator; NT is the retained ladder size. Equations use nominal controls. Hold flux constant uses the entered pulse-peak flux throughout; interpret φ_park = φ_swap in these equations. Otherwise w_TC is a sin² excursion, zero outside its pulse and one at its midpoint. Entered interaction flux sets f_T independently of f_c. Coupling remains active at park. See Tolerances for static errors.',
+        'Energies divided by h: MHz. d: SQUID asymmetry. n̂_T is the excitation operator for the two-state transmon. Equations use nominal controls. Hold flux constant uses the entered pulse-peak flux throughout; interpret φ_park = φ_swap in these equations. Otherwise w_TC is a sin² excursion, zero outside its pulse and one at its midpoint. Entered interaction flux sets f_T independently of f_c. Coupling remains active at park. See Tolerances for static errors.',
     ),
     "Coupling parameters": (
         (
@@ -188,10 +189,10 @@ SECTION_EQUATIONS = {
         (
             r"$L_T=b/\sqrt{T_{1,T}},\quad L_C=a/\sqrt{T_{1,c}},\quad L_j=|k_j\rangle\langle j|/\sqrt{\tau_j}$",
             r"$L_{\phi,T}=\frac{Z_T}{\sqrt{2T_{\phi,T}}},\qquad L_{\phi,R}=\frac{Z_R}{\sqrt{2T_{\phi,R}}},\qquad L_{\phi,H}=\frac{Z_H}{\sqrt{2T_{\phi,H}}}$",
-            r"$Z_T=2b^\dagger b-I,\quad Z_R=P_{r1}-P_{r0}+\sum_{j\in\mathrm{extra}}s_jP_j,\quad Z_H=P_{h1}-P_{h0}$",
+            r"$Z_T=2b^\dagger b-I,\quad Z_R=P_{r1}-P_{r0},\quad Z_H=P_{h1}-P_{h0}$",
             r"$\frac{1}{T_{2,T}}=\frac{1}{2T_{1,T}}+\frac{1}{T_{\phi,T}},\qquad Q_c=2\pi f_cT_{1,c}$",
         ),
-        'Times: μs. Rydberg r1 decays to r0; other Rydberg levels decay to lost. Extra-level s_j = −1/+1 for lower/upper branch; built-in wrong has zero weight in Z_R. The T2 relation assumes standard relaxation and no optical drive.',
+        'Times: μs. Rydberg r1 decays to r0; other Rydberg levels decay to lost. The unwanted atomic state has zero weight in Z_R. The T2 relation assumes standard relaxation and no optical drive.',
     ),
     "Pulses and input state": (
         (
@@ -200,7 +201,7 @@ SECTION_EQUATIONS = {
             r"$w(u)=\sin^2(\pi u/T_{\mathrm{swap}}),\quad 0\leq u\leq T_{\mathrm{swap}};\qquad w=0\ \mathrm{outside}$",
             r"$|\psi_{\mathrm{in}}\rangle=\cos(\vartheta/2)|0_L\rangle+e^{i\varphi}\sin(\vartheta/2)|1_L\rangle,\quad t_{\mathrm{end,write}}=t_{\mathrm{map,end}}+T_{\mathrm{storage}}$",
         ),
-        'Times: μs; delays: ns; angles: degrees. Ω_max is angular frequency. The π area is a reference, not guaranteed transfer. Each transition has its own effective peak Ω and sin² pulse duration; the two mapping pulses start together and the stage ends when both finish.\n\nLogical states: g/e for writing, h0/h1 for retrieval. Storage follows writing and precedes retrieval. GAP separates optical and exchange stages. Delay = voltage peak − flux peak; auto uses flux first for writing, voltage first for reading. Pulse multipliers include RAMP.',
+        'Times: μs; delays: ns; angles: degrees. Ω_max is angular frequency. The π area is a reference, not guaranteed transfer. Each transition has its own effective peak Ω and nominal sin² pulse duration; the two mapping pulses start together and the stage ends when both finish. Detailed pulse shapes can change peak, area, and transfer; durations are not automatically recalibrated. For each arm, enter the measured zero-field transition frequency and the effective two-photon mapping frequency, both in MHz; use auto for both to retain nominally resonant controls. The transition shifts by K times electric field squared. The mapping carrier stays fixed during each run, including tolerance variations. The same carrier applies to preparation, write and read pulses.\n\nLogical states: g/e for writing, h0/h1 for retrieval. Storage follows writing and precedes retrieval. GAP separates optical and exchange stages. Delay = voltage peak − flux peak; auto uses flux first for writing, voltage first for reading. Pulse multipliers include RAMP.',
     ),
     "Experimental tolerances": (
         (
@@ -212,20 +213,18 @@ SECTION_EQUATIONS = {
         ),
         "Enter absolute ± bounds; 0 disables a tolerance.\n"
         "Transfer plots and sweeps show shaded ranges and a With tolerances column.\n"
-        "Detunings use actual frequencies: Δ_j = 2π(f_j,actual − f_c,actual). f_A(E) includes energy tables when supplied. "
+        "Detunings use actual frequencies: Δ_j = 2π(f_j,actual − f_c,actual). "
         "Offsets are static; nominal pulse timings, optical carriers and coupling calibration stay fixed. "
-        "Tabulated dipoles are evaluated at the actual field. Ranges are sampled, not guaranteed limits. Details: README.txt.",
+        "Ranges are sampled, not guaranteed limits. Details: README.txt.",
     ),
     "Numerics": (
         (
             r"$\mathcal{H}=H/\hbar,\quad \dot\rho=-i[\mathcal{H},\rho]+\sum_k\left(L_k\rho L_k^\dagger-\frac{1}{2}\{L_k^\dagger L_k,\rho\}\right)$",
             r"$i\,\frac{d|\psi\rangle}{dt}=\mathcal{H}|\psi\rangle\quad\mathrm{(noiseless)},\qquad \Delta t_{\mathrm{internal}}\leq\Delta t_{\max}=\mathrm{MAX\_STEP}$",
-            r"$D=N_T N_c(6+N_{extra}+N_p),\qquad N_T\geq2,\quad N_c\geq3$",
+            r"$D=2\times2\times6=24$",
         ),
-        "NT sets the weakly anharmonic transmon ladder size. Use Rydberg levels to edit additional atomic levels and cavity links. "
-        "Defaults include one illustrative upper neighbor. N_p = 2 for the explicit laser model, otherwise 0. "
-        "The Hamiltonian ℋ is in rad/μs; collapse rates are in 1/μs. "
-        "Compare increasing bases with fixed controls before claiming convergence.",
+        "The transmon and cavity each have two fixed states; the cavity states are zero and one photon. The atom has six fixed states: h0, h1, r0, r1, loss, and the unwanted Rydberg state. "
+        "The Hamiltonian ℋ is in rad/μs; collapse rates are in 1/μs. Compare solver steps when checking numerical convergence. The cavity cannot contain two or more photons. Higher transmon levels and additional atomic leakage pathways are not modeled.",
     ),
 }
 
@@ -278,6 +277,7 @@ class ParameterPanel:
         self.backend_path=Path(backend_path).resolve()
         self.process=None
         self.plot_processes=[]
+        self._closed = False
         self.events=queue.Queue()
         self.temp_path=None
         self.stop_path=None
@@ -362,13 +362,14 @@ class ParameterPanel:
                 ttk.Label(label_cell,image=self.symbol_images[key]).pack(side="left",padx=(8,0))
                 value=tk.StringVar(value=str(default))
                 self.entries[key]=value
-                if key in MODEL_TITLES:
-                    entry=add_model_control(frame,row,key,value,self.entries,validate)
+                if key == "PULSE_SHAPES":
+                    from pulse_shape_editor import PulseShapeEditor
+                    entry = ttk.Button(frame, text="Edit pulse shapes…", command=lambda v=value: PulseShapeEditor(root, v))
                 else:
                     entry=(ttk.Checkbutton(frame,variable=value,onvalue="1",offvalue="0")
                            if rule == "boolean" else ttk.Entry(frame,textvariable=value,width=14))
-                    entry.grid(row=row,column=1,sticky="ew",pady=3)
-                    ttk.Label(frame,text=units,wraplength=95).grid(row=row,column=2,sticky="w",padx=6)
+                entry.grid(row=row,column=1,sticky="ew",pady=3)
+                ttk.Label(frame,text=units,wraplength=95).grid(row=row,column=2,sticky="w",padx=6)
                 self.input_widgets[key]=entry
             if group == "Cavity and transmon":
                 self.transmon_tuning=tk.StringVar()
@@ -441,6 +442,7 @@ class ParameterPanel:
         self.update_sweep_state()
         self.update_swap_rates()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
+        self.root.bind("<Destroy>", self.on_root_destroy, add="+")
         self.root.after(100,self.poll)
 
     def resize_reference(self,group,label,note,width):
@@ -847,7 +849,7 @@ class ParameterPanel:
         self._updating_assistant_values=True
         try:
             for key,value in changes.items():
-                self.entries[key].set("auto" if key in PULSE_DELAY_KEYS and value is None else str(value))
+                self.entries[key].set("auto" if value is None else str(value))
         except Exception as exc:
             for key,value in previous.items():
                 self.entries[key].set(value)
@@ -915,7 +917,7 @@ class ParameterPanel:
         self.sweep_enabled.set("Off")
         self.mode.set("Both transfer directions")
         for key,value in DEFAULTS.items():
-            self.entries[key].set("auto" if key in PULSE_DELAY_KEYS and value is None else str(value))
+            self.entries[key].set("auto" if value is None else str(value))
         self.status.set("Default model parameters restored.")
 
     def load(self):
@@ -925,7 +927,7 @@ class ParameterPanel:
         try:
             config=validate(json.loads(Path(path).read_text()))
             for key,value in config.items():
-                self.entries[key].set("auto" if key in PULSE_DELAY_KEYS and value is None else str(value))
+                self.entries[key].set("auto" if value is None else str(value))
             self.status.set("Settings loaded.")
         except Exception as exc:
             messagebox.showerror("Invalid settings",str(exc))
@@ -952,6 +954,7 @@ class ParameterPanel:
             self.status.set(
                 f"Model checks passed. Swap detuning TC/AC: "
                 f"{d['transmon_swap_detuning_MHz']:.5g}/{d['atom_swap_detuning_MHz']:.5g} MHz; "
+                f"optical detuning h0/r0: {d['optical_detuning_0_MHz']:+.5g} MHz, h1/r1: {d['optical_detuning_1_MHz']:+.5g} MHz; "
                 f"optical pulses h0/r0: {d['optical_pi_pulse_us']:.5g} us, h1/r1: {d['optical_pi_pulse_1_us']:.5g} us; "
                 f"nominal atom swap hold: {d['atom_swap_hold_us']:.5g} us; "
                 f"cavity Q: {d['cavity_Q']:.4g}.")
@@ -985,8 +988,9 @@ class ParameterPanel:
         if self.save.get():
             command.append("--save")
         try:
+            child_env = {**os.environ, "HYBRID_PANEL_PARENT_PID": str(os.getpid())}
             self.process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                                          text=True,bufsize=1,start_new_session=(os.name=="posix"))
+                                          text=True,bufsize=1,start_new_session=(os.name=="posix"), env=child_env)
         except Exception as exc:
             self.temp_path.unlink(missing_ok=True)
             messagebox.showerror("Could not start simulation",str(exc))
@@ -1013,17 +1017,33 @@ class ParameterPanel:
             self.events.put(("line",(process,line)))
         self.events.put(("done",(process,process.wait())))
 
+    @staticmethod
+    def terminate_plot_process(process):
+        """Close all windows owned by a simulation process and its workers."""
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=0.5)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=0.5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+
     def close_previous_plots(self):
-        """Each previous result window belongs to its completed child process."""
+        """Close the figure windows belonging to previous simulation runs."""
         for process in self.plot_processes:
-            if process.poll() is None:
-                try:
-                    if os.name=="posix":
-                        os.killpg(process.pid,signal.SIGTERM)
-                    else:
-                        process.terminate()
-                except ProcessLookupError:
-                    pass
+            self.terminate_plot_process(process)
         self.plot_processes=[]
 
     def release_calculation(self,status,message):
@@ -1135,25 +1155,27 @@ class ParameterPanel:
             self.stop_button.configure(state="disabled")
             self.status.set("Stopping calculation and preparing available figures...")
 
-    def close(self):
-        processes=[p for p in [self.process,*self.plot_processes]
-                   if p is not None and p.poll() is None]
-        if processes:
-            if not messagebox.askyesno("Close simulation panel","Close the active simulation and its plot windows?"):
-                return
-            for process in processes:
-                if os.name=="posix":
-                    try:
-                        os.killpg(process.pid,signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                else:
-                    process.terminate()
+    def cleanup_on_close(self):
+        """Stop simulations whether the panel closes normally or is destroyed."""
+        if getattr(self, '_closed', False):
+            return
+        self._closed = True
+        for process in [self.process, *self.plot_processes]:
+            self.terminate_plot_process(process)
+        self.process = None
+        self.plot_processes = []
         self.assistant_cancel.set()
         if self.temp_path:
             self.temp_path.unlink(missing_ok=True)
-        if getattr(self,"pulse_preview",None) is not None:
+        if getattr(self, "pulse_preview", None) is not None:
             self.pulse_preview.close()
+
+    def on_root_destroy(self, event):
+        if event.widget is self.root:
+            self.cleanup_on_close()
+
+    def close(self):
+        self.cleanup_on_close()
         self.root.destroy()
 
 

@@ -39,13 +39,10 @@ transfer directions. Null/auto retains historical sequential ordering. It does n
 change pulse widths, peaks, resonance, optical carrier phases, or quantum phase.
 The panel uses this timing control instead of the simultaneous-resonance checkbox.
 Zero delay alone does not imply resonance or matched pulse widths.
-The model has NT weakly anharmonic transmon levels, NC cavity states, and
-six base atomic states h0,h1,r0,r1,loss,wrong plus RYDBERG_MANIFOLD neighbors.
-NT defaults to 3; the default extra level is wrong_upper. Atomic neighbor
-parameters are illustrative, not a calibrated atomic spectrum. Higher transmon
-levels couple with sqrt(j) ladder matrix elements; their anharmonicity is -EC.
-Transmon e population excludes higher levels; transmon_leakage reports them.
-Wrong-Rydberg population sums wrong and all added atomic neighbors.
+The model has a fixed two-level transmon (g,e), two cavity states (0 and 1 photon), and six
+atomic states h0,h1,r0,r1,loss,wrong. It does not model leakage into higher
+transmon levels, two-photon cavity states, or additional atomic levels. Wrong-Rydberg population is the
+built-in unwanted atomic state.
 Both TC and AC couplings remain on at all times.
 Use current_panel.protocol to distinguish the active implementation. Sequential flux and
 field use rounded sin-squared excursions without a flat hold; their duration is
@@ -75,7 +72,7 @@ CLI sweeps and noise on/off switches are not available in the panel. Tolerance r
 error sensitivity tests, not control optimization. Changing INPUT_THETA/INPUT_PHI,
 turning off tolerances, shortening the requested memory hold, or making lifetimes
 arbitrarily long does not establish a better transfer protocol.
-Optical envelopes in the ideal mode are sin-squared pi pulses. Standard lifetime and dephasing channels are included.
+OPTICAL_TRANSITION_0/1 are optional measured zero-field atomic transition frequencies, and OPTICAL_MAPPING_0/1 are their fixed effective two-photon mapping frequencies. Both must be supplied per arm, or both set to auto. Atomic transitions shift with K_R0/1 times field squared. The difference between the mapping frequency and the field-shifted transition is the optical detuning; in auto mode the carrier is nominally resonant. Detuning can reduce mapping fidelity. PULSE_SHAPES customizes each optical, flux and voltage envelope with a sin-squared window, Gaussian peaks, and deterministic seeded sampled noise. Changing the shape changes peak and area without retuning durations; fixed controls bypass their pulse shape. Optical envelopes default to sin-squared nominal pi pulses. Standard lifetime and dephasing channels are included.
 Write maps (alpha|g>+beta|e>)|0,h0> to |g,0>(alpha|h0>+beta|h1>).
 Independent read starts from a prepared atomic state, holds for STORAGE, then retrieves.
 Joint fidelity is <target|rho|target>, including empty source/cavity, without postselection.

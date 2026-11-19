@@ -17,7 +17,7 @@ import simulation_stop as stopping
 
 SWEEP_FIELDS = [row for row in FIELDS
                 if row[0] not in ('Experimental tolerances', 'Simultaneous resonance', 'Numerics')
-                and row[-1] not in ('boolean',)]
+                and row[-1] not in ('boolean', 'optional_optical_frequency', 'pulse_shapes')]
 MAX_POINTS = 501
 
 

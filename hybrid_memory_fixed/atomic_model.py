@@ -1,7 +1,6 @@
 """Quadratic atomic Stark energies and constant cavity couplings."""
 import math
 import numpy as np
-from multilevel import parse_manifold
 
 DIPOLE_TO_MHZ = 1.602176634e-19 * 5.29177210544e-11 / 6.62607015e-34 / 1e6
 
@@ -9,15 +8,11 @@ DIPOLE_TO_MHZ = 1.602176634e-19 * 5.29177210544e-11 / 6.62607015e-34 / 1e6
 def atomic_levels(config):
     return {'r0': (0, 0., config['K_R0']),
             'r1': (1, config['F_A_ZERO'], config['K_R1']),
-            'wrong': (0, config['F_WRONG_SPLIT'], config['K_WRONG']),
-            **{x['label']: (x['branch'], x['offset_MHz'] + x['branch']*config['F_A_ZERO'],
-                             x['stark_MHz_per_Vcm2']) for x in parse_manifold(config['RYDBERG_MANIFOLD'])}}
+            'wrong': (0, config['F_WRONG_SPLIT'], config['K_WRONG'])}
 
 
 def cavity_links(config):
-    return {'r1<-r0': 1., **{f"{x['label']}<-{source}": strength
-            for x in parse_manifold(config['RYDBERG_MANIFOLD'])
-            for source, strength in x['cavity_from'].items()}}
+    return {'r1<-r0': 1.}
 
 
 class AtomicModel:
