@@ -95,7 +95,10 @@ class PulsePreview:
             self.readout.set('Preview unavailable while a parameter is invalid.')
             return
         self.draw()
-        self.status.set('Nominal controls. Drag the time cursor or click a plot to inspect values.')
+        if self.controls['settings']['CONSTANT_FIELD'] and self.selected_direction() == 'write':
+            self.status.set('Preview uses an estimated mapping time; the simulation selects it from the atomic dynamics.')
+        else:
+            self.status.set('Nominal controls. Drag the time cursor or click a plot to inspect values.')
 
     def refresh_now(self):
         if self.closed:

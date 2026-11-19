@@ -5,7 +5,8 @@ import numpy as np
 from atomic_model import AtomicModel
 from pulse_shapes import parse_shapes, pulse_window
 from hybrid_settings import (calculated_swap_field, calculated_transmon_frequency,
-                             derived, effective_controls, pulse_intervals, validate)
+                             derived, effective_controls, pulse_intervals, validate,
+                             constant_field_intervals)
 
 
 def control_preview(settings, direction='write', times=None):
@@ -20,6 +21,10 @@ def control_preview(settings, direction='write', times=None):
                             values['transmon_pulse_duration_us'],
                             values['atom_pulse_duration_us'], direction)
     mapping_start = max(tc[1], ac[1])+config['GAP']
+    if config['CONSTANT_FIELD']:
+        tc, ac, mapping_start = constant_field_intervals(
+            config, prep[1]+config['GAP'] if config['CONSTANT_FLUX'] or direction == 'read' else tc[0],
+            values['transmon_pulse_duration_us'], direction)
     mapping = (mapping_start, mapping_start+(max(optical0, optical1) if direction == 'write' else optical0))
     finish = mapping[1]
     if times is None:
@@ -29,6 +34,7 @@ def control_preview(settings, direction='write', times=None):
         intervals.append((mapping_start, mapping_start+optical1) if direction == 'write' else (0., optical1))
         points.extend(np.linspace(*interval, 257) for interval in intervals)
         times = np.unique(np.concatenate(points))
+        times = times[times <= finish]
     times = np.asarray(times, dtype=float)
 
     shapes = parse_shapes(config['PULSE_SHAPES'])

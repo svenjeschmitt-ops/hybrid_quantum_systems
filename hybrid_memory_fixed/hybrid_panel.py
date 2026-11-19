@@ -36,7 +36,7 @@ configure_tk_libraries()
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
-from hybrid_settings import FIELDS, DEFAULTS, PULSE_DELAY_KEYS, validate, derived
+from hybrid_settings import FIELDS, DEFAULTS, PULSE_DELAY_KEYS, validate, derived, resonant_flux
 from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
 from assistant_proposals import parse_proposal, prepare_application
@@ -893,9 +893,14 @@ class ParameterPanel:
             f"detuning: {d['transmon_park_frequency_MHz']-config['FC']:+.6g} MHz.\n"
             "Tune the interaction flux to set the transmon resonance frequency.")
         if config['CONSTANT_FLUX']:
+            try:
+                reference = f"Bare cavity resonance is at flux {resonant_flux(config):.6g} Φ/Φ₀."
+            except ValueError:
+                reference = "Bare cavity resonance is outside the transmon tuning range."
             self.transmon_tuning.set(
                 f"Constant entered flux: {d['swap_flux']:.6g}.\n"
                 f"Transmon frequency: {d['transmon_interaction_frequency_MHz']:.6g} MHz; detuning: {detuning:+.6g} MHz.\n"
+                f"{reference}\n"
                 "Parked flux is unused; the entered pulse-peak flux stays constant.")
         self.swap_rates.set(
             f"{'Manual' if config['DIRECT_COUPLING'] else 'Calculated'} couplings g/(2π): TC {d['transmon_coupling_MHz']:.5g}; AC {d['atom_coupling_MHz']:.5g} MHz.\n"

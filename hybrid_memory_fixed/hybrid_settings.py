@@ -320,6 +320,36 @@ def pulse_intervals(config, start, transmon_duration, atom_duration, direction="
             (origin+ac_start, origin+ac_start+atom_duration))
 
 
+def constant_field_intervals(config, start, transmon_duration, direction):
+    """Estimate exchange timing when the atomic field has no voltage pulse."""
+    couplings = coupling_strengths(config)
+    field = calculated_swap_field(config)
+    atom_detuning = float(AtomicModel(config).transition(field)) - config['FC']
+    atom_frequency = math.hypot(atom_detuning, 2 * couplings['atom_coupling_MHz'])
+    atom_half_swap = 1 / (2 * atom_frequency) if atom_frequency else 0.
+    transmon_detuning = calculated_transmon_frequency(config, config['PHI_SWAP']) - config['FC']
+    transmon_frequency = math.hypot(transmon_detuning, 2 * couplings['transmon_coupling_MHz'])
+    transmon_half_swap = 1 / (2 * transmon_frequency) if transmon_frequency else 0.
+    if direction == 'write':
+        if config['CONSTANT_FLUX']:
+            first = transmon_half_swap
+            period = 1 / transmon_frequency if transmon_frequency else 0.
+            atom_start = (first + max(0, math.ceil((start - first) / period)) * period
+                          if period else start)
+            tc = (start, atom_start)
+        else:
+            tc = (start, start + transmon_duration)
+            atom_start = tc[1] + config['GAP']
+        ac = (atom_start, atom_start + atom_half_swap)
+    elif direction == 'read':
+        ac = (start, start + atom_half_swap)
+        tc_start = ac[1] + config['GAP']
+        tc = (tc_start, tc_start + (transmon_half_swap if config['CONSTANT_FLUX'] else transmon_duration))
+    else:
+        raise ValueError('direction must be write or read')
+    return tc, ac, max(tc[1], ac[1]) + config['GAP']
+
+
 def derived(config):
     c=effective_controls(validate(config))
     couplings=coupling_strengths(c)

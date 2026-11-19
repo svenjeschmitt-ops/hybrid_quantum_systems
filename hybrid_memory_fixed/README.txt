@@ -164,6 +164,30 @@ E_swap = V_SWAP/GAP_CM + STRAY_FIELD; the atomic transition can be detuned.
 Reducing FC by 100 MHz increases both peak detunings by +100 MHz. Changing FC alone
 does not retune either transition or change the nominal swap holds.
 The panel reports both detunings. Detuning reduces excitation transfer.
+For Atom to transmon with Hold flux constant enabled, the readout samples
+17 cleanup start times between the end of the atom-cavity pulse (plus the
+configured gap) and the original cleanup start. It selects the largest mean
+unconditional joint fidelity over the six cardinal input states, with no
+phase correction. The displayed retrieval ends after the selected cleanup;
+the purple dashed line marks that time. This is a sampled optimum over that
+finite window, not a guarantee of the global optimum. The flux remains
+constant, so the excitation can continue to oscillate after the marked time.
+For Transmon to atom with Hold flux constant, the atom pulse starts at the
+first estimated transmon-cavity exchange peak after preparation and the gap.
+The estimate uses the transmon-cavity coupling and fixed detuning; mapping
+follows the atom pulse. The full simulation calculates the resulting fidelity.
+This quick timing estimate does not guarantee optimal transfer. Large
+transmon-cavity detuning can still make the transfer inefficient. With a
+nonconstant electric field, the write-store-read round trip retains its timing.
+For Hold electric field constant, there is no voltage pulse to wait for.
+Writing uses one excited-input pilot simulation with the actual controls to
+find the first substantial r1 population peak after the preceding pulse and
+the configured gap. It schedules the mapping pulse at that peak and reports
+the wait. The finite mapping pulse and ongoing couplings can shift the best
+fidelity, so this is a timing estimate, not a fidelity guarantee. If flux is
+pulsed, its actual pulse duration is retained. The write preview shows a
+coupling-based estimate; the full simulation determines the mapping start.
+Read timing uses coupling-based exchange estimates.
 The Cavity and transmon tab also displays the interaction and parked
 detunings live, and identifies whether the interaction is resonant or detuned.
 Old F_SWAP_TARGET JSON entries must be removed. Replace F_T_INTERACTION
