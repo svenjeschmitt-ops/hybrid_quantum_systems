@@ -55,6 +55,9 @@ MODES = [
 PARAMETER_SYMBOLS = {
     "CONSTANT_FLUX": r"\phi(t)=\phi_{\mathrm{swap}}",
     "CONSTANT_FIELD": r"E(t)=V_{\mathrm{swap}}/\ell+E_{\mathrm{stray}}",
+    "COUPLING_SWITCH_MODE": r"g_{\mathrm{dest}}(t)",
+    "WRITE_COUPLING_START_NS": r"t_{\mathrm{on,write}}",
+    "READ_COUPLING_START_NS": r"t_{\mathrm{on,read}}",
     "WRITE_PULSE_DELAY_NS": r"\tau_{\mathrm{write}}",
     "READ_PULSE_DELAY_NS": r"\tau_{\mathrm{read}}",
     "SIM_HOLD_SCALE": r"s_{\mathrm{sim}}",
@@ -157,7 +160,7 @@ SECTION_EQUATIONS = {
             r"$\phi(t)=\phi_{\mathrm{park}}+[\phi_{\mathrm{swap}}-\phi_{\mathrm{park}}]w_{TC}(t)$",
             r"$\Delta_{T,\mathrm{park}}=2\pi(f_{T,\mathrm{park}}-f_c),\qquad H_T(t)/\hbar=\Delta_T(t)\hat n_T$",
         ),
-        'Energies divided by h: MHz. d: SQUID asymmetry. n̂_T is the excitation operator for the two-state transmon. Equations use nominal controls. Hold flux constant uses the entered pulse-peak flux throughout; interpret φ_park = φ_swap in these equations. Otherwise w_TC is a sin² excursion, zero outside its pulse and one at its midpoint. Entered interaction flux sets f_T independently of f_c. Coupling remains active at park. See Tolerances for static errors.',
+        'Energies divided by h: MHz. d: SQUID asymmetry. n̂_T is the excitation operator for the two-state transmon. Equations use nominal controls. Hold flux constant uses the entered pulse-peak flux throughout; interpret φ_park = φ_swap in these equations. Otherwise w_TC is a sin² excursion. The optional idealized switch in Couplings controls the destination coupling independently of flux. See Tolerances for static errors.',
     ),
     "Coupling parameters": (
         (
@@ -166,7 +169,7 @@ SECTION_EQUATIONS = {
             r"$f_{\mathrm{swap},TC}=2g_{TC}/(2\pi),\qquad f_{\mathrm{swap},AC}=2g_{AC}/(2\pi),\qquad t_{\mathrm{ref}}=1/(2f_{\mathrm{swap}})$",
             r"$\beta=\frac{C_g}{C_\Sigma},\qquad n_{01}\approx\left(\frac{E_J(\Phi_{\mathrm{swap}})}{32E_C}\right)^{1/4}$",
         ),
-        'C_g: coupling capacitance; C_Σ: total transmon capacitance. The charge matrix element is evaluated at the interaction flux and held fixed during a run. These formulas apply without manual overrides. Swap frequencies are ideal single-excitation references; rounded pulses and detuning change transfer.',
+        'C_g: coupling capacitance; C_Σ: total transmon capacitance. For standard transfers with constant flux or field, leave destination coupling on for always-on coupling, or turn it off to enter separate write/read start times in ns from the start of each transfer. Timed switching is an idealized tunable coupler, not a consequence of constant flux or field.',
     ),
     "Direct coupling": (
         (
@@ -174,7 +177,7 @@ SECTION_EQUATIONS = {
             r"$f_{\mathrm{swap},j}=2g_{j,\mathrm{input}},\qquad t_{\mathrm{ref},j}=1/(4g_{j,\mathrm{input}})$",
             r"$T_j=s_j(2T_{\mathrm{ramp}}+t_{\mathrm{ref},j}),\qquad j\in\{TC,AC\}$",
         ),
-        'Inputs are g/(2π) in MHz; Hamiltonian couplings are in rad/μs. Manual couplings remain constant during each run. Changing couplings does not retune sequential controls or optimize pulse multipliers.',
+        'Inputs are g/(2π) in MHz; Hamiltonian couplings are in rad/μs. Couplings are the on-state values. With destination coupling off for a constant-control run, it is zero until the entered start time and takes its entered value afterward. Enter separate times for write and read.',
     ),
     "Atom and electrodes": (
         (
@@ -268,6 +271,10 @@ class ParameterTab(ttk.Frame):
 
 
 
+def panel_value(key, value):
+    return 'auto' if value is None else str(value)
+
+
 class ParameterPanel:
     def __init__(self, root, backend_path=None):
         self.root=root
@@ -317,13 +324,20 @@ class ParameterPanel:
                      "Pulses and input state":"Pulses & input", "Experimental tolerances":"Tolerances"}.get(group,group)
             self.tabs.add(tab,text=caption)
             self.parameter_tabs[group]=tab
-            tab.body.columnconfigure(0,weight=3,uniform="panes")
-            tab.body.columnconfigure(1,weight=2,uniform="panes")
+            if group == "Pulses and input state":
+                tab.body.columnconfigure(0,weight=5,uniform="panes")
+                tab.body.columnconfigure(1,weight=6,uniform="panes")
+            else:
+                tab.body.columnconfigure(0,weight=3,uniform="panes")
+                tab.body.columnconfigure(1,weight=2,uniform="panes")
             tab.body.rowconfigure(0,weight=1)
             frame=ttk.Frame(tab.body,padding=(8,6))
             frame.grid(row=0,column=0,sticky="nsew")
             frame.grid_propagate(False)
-            frame.columnconfigure(1,weight=1)
+            if group == "Pulses and input state":
+                frame.columnconfigure(3,weight=1)
+            else:
+                frame.columnconfigure(1,weight=1)
             equations=ttk.Frame(tab.body,padding=(8,8))
             equations.grid(row=0,column=1,sticky="nsew")
             equations.grid_propagate(False)
@@ -355,20 +369,24 @@ class ParameterPanel:
             for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ")):
                 label_cell=ttk.Frame(frame)
                 label_cell.grid(row=row,column=0,sticky="w",padx=(0,8),pady=3)
-                ttk.Label(label_cell,text=PARAMETER_CAPTIONS.get(key,label),wraplength=230,justify="left").pack(side="left")
+                ttk.Label(label_cell,text=PARAMETER_CAPTIONS.get(key,label),
+                          wraplength=185 if group == "Pulses and input state" else 230,
+                          justify="left").pack(side="left")
                 self.symbol_images[key]=tk.PhotoImage(
                     master=root,data=base64.b64encode(
                         parameter_symbol_png(key,dpi=root.winfo_fpixels("1i"))).decode("ascii"))
                 ttk.Label(label_cell,image=self.symbol_images[key]).pack(side="left",padx=(8,0))
-                value=tk.StringVar(value=str(default))
+                value=tk.StringVar(value=panel_value(key,default))
                 self.entries[key]=value
                 if key == "PULSE_SHAPES":
                     from pulse_shape_editor import PulseShapeEditor
                     entry = ttk.Button(frame, text="Edit pulse shapes…", command=lambda v=value: PulseShapeEditor(root, v))
+                elif rule == "coupling_mode":
+                    entry = ttk.Checkbutton(frame, variable=value, onvalue='always_on', offvalue='manual')
                 else:
                     entry=(ttk.Checkbutton(frame,variable=value,onvalue="1",offvalue="0")
                            if rule == "boolean" else ttk.Entry(frame,textvariable=value,width=14))
-                entry.grid(row=row,column=1,sticky="ew",pady=3)
+                entry.grid(row=row,column=1,sticky="w" if group == "Pulses and input state" else "ew",pady=3)
                 ttk.Label(frame,text=units,wraplength=95).grid(row=row,column=2,sticky="w",padx=6)
                 self.input_widgets[key]=entry
             if group == "Cavity and transmon":
@@ -428,14 +446,15 @@ class ParameterPanel:
         self.pulse_preview=PulsePreview(
             self.pulse_preview_frame,self.root,self.config,
             lambda: (self.tabs.select()==str(self.parameter_tabs["Pulses and input state"])
-                     and self.pulse_preview_tabs.select()==str(self.pulse_preview_frame)))
+                     and self.pulse_preview_tabs.select()==str(self.pulse_preview_frame)),
+            get_run=lambda: self.last_run)
         self.tabs.bind("<<NotebookTabChanged>>",self.pulse_preview.visibility_changed,add="+")
         self.pulse_preview_tabs.bind("<<NotebookTabChanged>>",self.pulse_preview.visibility_changed,add="+")
         self.mode.trace_add("write",lambda *_: self.pulse_preview.sync_output(self.mode.get()))
         for value in self.entries.values():
             value.trace_add("write",self.update_swap_rates)
             value.trace_add("write",self.pulse_preview.schedule)
-        for key in ("CONSTANT_FLUX", "CONSTANT_FIELD"):
+        for key in ("CONSTANT_FLUX", "CONSTANT_FIELD", "COUPLING_SWITCH_MODE"):
             self.entries[key].trace_add("write",self.update_coupling_mode)
         self.mode.trace_add("write",self.update_swap_rates)
         self.update_coupling_mode()
@@ -496,6 +515,9 @@ class ParameterPanel:
             self.input_widgets[key].configure(state="disabled" if manual else "normal")
         constant_flux=self.entries['CONSTANT_FLUX'].get() in ('1','1.0')
         constant_field=self.entries['CONSTANT_FIELD'].get() in ('1','1.0')
+        manual_switch = self.entries['COUPLING_SWITCH_MODE'].get().lower() == 'manual'
+        for key in ('WRITE_COUPLING_START_NS','READ_COUPLING_START_NS'):
+            self.input_widgets[key].configure(state='normal' if manual_switch else 'disabled')
         for key in ('PHI_PARK', 'E_PARK'):
             constant=constant_flux if key=='PHI_PARK' else constant_field
             self.input_widgets[key].configure(state='disabled' if constant else 'normal')
@@ -849,7 +871,7 @@ class ParameterPanel:
         self._updating_assistant_values=True
         try:
             for key,value in changes.items():
-                self.entries[key].set("auto" if value is None else str(value))
+                self.entries[key].set(panel_value(key,value))
         except Exception as exc:
             for key,value in previous.items():
                 self.entries[key].set(value)
@@ -922,7 +944,7 @@ class ParameterPanel:
         self.sweep_enabled.set("Off")
         self.mode.set("Both transfer directions")
         for key,value in DEFAULTS.items():
-            self.entries[key].set("auto" if value is None else str(value))
+            self.entries[key].set(panel_value(key,value))
         self.status.set("Default model parameters restored.")
 
     def load(self):
@@ -930,10 +952,17 @@ class ParameterPanel:
         if not path:
             return
         try:
-            config=validate(json.loads(Path(path).read_text()))
+            saved = json.loads(Path(path).read_text())
+            old_automatic = (str(saved.get('COUPLING_SWITCH_MODE', '')).strip().lower() == 'automatic' or
+                             ('COUPLING_SWITCH_MODE' not in saved and str(saved.get('SWITCH_DESTINATION_COUPLING', '0')).strip() in ('1','1.0')))
+            config=validate(saved)
             for key,value in config.items():
-                self.entries[key].set("auto" if value is None else str(value))
-            self.status.set("Settings loaded.")
+                self.entries[key].set(panel_value(key,value))
+            if old_automatic:
+                self.status.set("Old automatic coupling changed to manual; review both coupling start times.")
+                messagebox.showinfo("Review coupling times", "This file used automatic coupling timing, which has been replaced by manual timing. Review the write and read start times before running.")
+            else:
+                self.status.set("Settings loaded.")
         except Exception as exc:
             messagebox.showerror("Invalid settings",str(exc))
 
@@ -1006,6 +1035,7 @@ class ParameterPanel:
         self.run_button.configure(state="disabled")
         self.last_run={"settings":run_config,"mode":self.mode.get(),"status":"running","output":"",
                        "output_directory":report_directory}
+        self.pulse_preview.schedule()
         self.assistant_context_run=self.last_run
         if "--parameter-sweep" in mode_args:
             self.last_run["sweep"]={"parameter":self.sweep_labels[self.sweep_parameter.get()],
@@ -1094,6 +1124,9 @@ class ParameterPanel:
                     if self.handle_progress(value):
                         continue
                     self.append(value)
+                    if value.startswith("Assistant numerical report ready:") and self.last_run is not None:
+                        direction=Path(value.split(":",1)[1].strip()).stem
+                        self.pulse_preview.report_ready(direction,select=self.last_run['mode']=="Both transfer directions")
                     if value.startswith("Calculation stopped."):
                         self.release_calculation("stopped","Calculation stopped. Starting a new run will close these plots.")
                     if self.last_run is not None and getattr(self,"assistant_context_run",self.last_run) is self.last_run:

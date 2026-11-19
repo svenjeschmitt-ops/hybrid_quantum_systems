@@ -1,6 +1,7 @@
 """Shared parameter definitions and mathematical checks for the hybrid model."""
 import json
 import math
+import warnings
 from pathlib import Path
 from atomic_model import AtomicModel
 from optical_model import optical_detuning
@@ -26,6 +27,9 @@ FIELDS = [
 ("Coupling parameters","E_ZPF_V_PER_M","Cavity zero-point field at atom","V/m",0.8,"positive"),
 ("Coupling parameters","DIPOLE_ALIGNMENT","Dipole-field alignment cos(theta)","dimensionless",1.0,"free"),
 ("Coupling parameters","DIRECT_COUPLING","Use direct coupling inputs","0=calculated, 1=manual",0,"boolean"),
+("Coupling parameters","COUPLING_SWITCH_MODE","Destination coupling always on (turn off to set start times; constant-control standard transfers)","", "always_on", "coupling_mode"),
+("Coupling parameters","WRITE_COUPLING_START_NS","Manual atom coupling start (transmon to atom)","ns",0.0,"nonnegative"),
+("Coupling parameters","READ_COUPLING_START_NS","Manual transmon coupling start (atom to transmon)","ns",0.0,"nonnegative"),
 ("Coupling parameters","G_TC_MHZ","Transmon-cavity coupling g_TC / (2 pi)","MHz",11.023791568183459,"positive"),
 ("Coupling parameters","G_AC_MHZ","Atom-cavity coupling g_AC / (2 pi)","MHz",10.236358418015183,"positive"),
 ("Atom and electrodes","F_A_ZERO","Zero-field Rydberg transition","MHz",5150.0,"positive"),
@@ -177,6 +181,18 @@ def validate(values):
                          "the swap flux and EC. Remove N_01 from saved settings.")
     # Migrate the former shared delay without overwriting explicit new values.
     values = dict(values)
+    has_legacy_switch = 'SWITCH_DESTINATION_COUPLING' in values
+    legacy_switch = values.pop('SWITCH_DESTINATION_COUPLING', None)
+    if has_legacy_switch:
+        try:
+            legacy_switch = float(legacy_switch)
+        except (TypeError, ValueError):
+            raise ValueError('Legacy destination coupling switch must be 0 or 1.') from None
+        if legacy_switch not in (0, 1):
+            raise ValueError('Legacy destination coupling switch must be 0 or 1.')
+        if legacy_switch and 'COUPLING_SWITCH_MODE' not in values:
+            warnings.warn('Legacy automatic coupling now uses manual start times; review both times.', UserWarning, stacklevel=2)
+        values.setdefault('COUPLING_SWITCH_MODE', 'manual' if legacy_switch else 'always_on')
     if "PULSE_DELAY_NS" in values:
         previous_delay = values.pop("PULSE_DELAY_NS")
         for key in PULSE_DELAY_KEYS:
@@ -250,6 +266,15 @@ def validate(values):
     config = dict(DEFAULTS)
     config.update(values)
     for _,key,label,_,_,rule in FIELDS:
+        if rule == "coupling_mode":
+            value = str(config[key]).strip().lower().replace(' ', '_')
+            if value == 'automatic':
+                warnings.warn('Automatic coupling mode was replaced by manual start times; review both times.', UserWarning, stacklevel=2)
+                value = 'manual'  # Legacy automatic mode has no equivalent on/off setting.
+            if value not in ('always_on','manual'):
+                raise ValueError('Destination coupling must be always_on or manual.')
+            config[key] = value
+            continue
         if rule == "pulse_shapes":
             config[key] = json.dumps(parse_shapes(config[key]), sort_keys=True)
             continue

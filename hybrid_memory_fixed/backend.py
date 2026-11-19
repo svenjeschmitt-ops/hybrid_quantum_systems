@@ -727,12 +727,12 @@ def main(check=False, save=False):
     work=progress.transfer_stages(_SETTINGS)
     progress.update(work["start"], "Calculating write dynamics")
     write_gate = None
-    if _SETTINGS['SWITCH_DESTINATION_COUPLING'] and (_SETTINGS['CONSTANT_FLUX'] or _SETTINGS['CONSTANT_FIELD']):
-        progress.update(work['start'], 'Finding cavity peak for destination coupling')
-        write_gate = cavity_gate_time('write')
+    if _SETTINGS['COUPLING_SWITCH_MODE'] != 'always_on' and (_SETTINGS['CONSTANT_FLUX'] or _SETTINGS['CONSTANT_FIELD']):
+        progress.update(work['start'], 'Setting destination coupling time')
+        write_gate = selected_coupling_switch('write')
         _WRITE_GATE_TIME = write_gate['time_us']
         configure_write_atom_start(_NOMINAL_AC[0], honor_tc=True)
-        print(f"Idealized atom-cavity coupling switch: {_WRITE_GATE_TIME*1000:.2f} ns; reference cavity photons {write_gate['mean_photons']:.3f}", flush=True)
+        print(f"Idealized atom-cavity coupling switch ({write_gate['mode']}): {_WRITE_GATE_TIME*1000:.2f} ns", flush=True)
     timing_search = None
     if _SETTINGS["CONSTANT_FIELD"]:
         with progress.scope(work["start"], work["selected"]*.8, "Searching write timing"):
@@ -741,7 +741,7 @@ def main(check=False, save=False):
         _WRITE_TIMING_ACTIVE = True
     elif _SETTINGS["CONSTANT_FLUX"]:
         with progress.scope(work["start"], work["selected"]*.8, "Searching write timing"):
-            timing_search = (optimize_constant_field_write(atom_start=_WRITE_GATE_TIME)
+            timing_search = (optimize_constant_field_write(atom_start=max(_WRITE_GATE_TIME, PREP[1]+GAP))
                              if _WRITE_GATE_TIME is not None else optimize_constant_flux_write())
         configure_write_atom_start(timing_search["atom_start_us"], mapping_start=timing_search.get("mapping_start_us"))
         _WRITE_TIMING_ACTIVE = True
@@ -880,8 +880,10 @@ def main(check=False, save=False):
     summary_rows = tolerance_bands.table_rows(summary_rows, bands, "write")
     if write_gate:
         suffix = ["—"] if bands else []
-        summary_rows[1:1] = [["Idealized atom coupling switch", f"{write_gate['time_us']*1000:.2f} ns", *suffix],
-                             ["Reference cavity photons at switch", f"{write_gate['mean_photons']:.3f}", *suffix]]
+        rows = [[f"Idealized atom coupling switch ({write_gate['mode']})", f"{write_gate['time_us']*1000:.2f} ns", *suffix]]
+        if write_gate['mean_photons'] is not None:
+            rows.append(["Reference cavity photons at switch", f"{write_gate['mean_photons']:.3f}", *suffix])
+        summary_rows[1:1] = rows
     cavity_peak = (sampled_cavity_peak(ts, pops[1], PREP[1], MAP[0])
                    if _SETTINGS["CONSTANT_FLUX"] or _SETTINGS["CONSTANT_FIELD"] else None)
     if cavity_peak:
@@ -1242,6 +1244,21 @@ def cavity_gate_time(direction, source="hyperfine"):
             "model": "ideal instantaneous switch; reference trajectory holds destination coupling off"}
 
 
+def selected_coupling_switch(direction, source="hyperfine"):
+    """Resolve the user-selected always-on or manual switch."""
+    if direction not in ('write', 'read'):
+        raise ValueError('Invalid transfer direction')
+    if not (_SETTINGS['CONSTANT_FLUX'] or _SETTINGS['CONSTANT_FIELD']):
+        return None
+    mode = _SETTINGS['COUPLING_SWITCH_MODE']
+    if mode == 'always_on':
+        return None
+    key = 'WRITE_COUPLING_START_NS' if direction == 'write' else 'READ_COUPLING_START_NS'
+    return {"time_us": float(_SETTINGS[key]/1000), "mean_photons": None,
+            "reference_input": None, "destination_coupling": direction,
+            "mode": "manual", "model": "ideal instantaneous switch at user-specified time"}
+
+
 def evolve_read(initial, noisy=True, source="hyperfine", step=MAX_STEP):
     h_read, ts, stages, flux_read, voltage_read = retrieval_model(source)
     options = {"store_states": True, "atol": 1e-11, "rtol": 1e-9,
@@ -1290,24 +1307,27 @@ def optimize_constant_flux_readout(source="hyperfine", samples=None, roundtrip=F
     input once up to the candidate starts, then simulate the complete cleanup
     separately at each start.  Flux is never altered by the search.
     """
-    h, _, stages, _, _ = retrieval_model(source)
+    _, _, stages, _, _ = retrieval_model(source)
     intervals = dict(stages)
     latest = intervals["Return atom to h0"][0]
     earliest = max(intervals["Atom to cavity"][1],
                    intervals.get("Memory to Rydberg", (0., 0.))[1]) + GAP
     if _READ_GATE_TIME is not None:
         earliest = max(earliest, _READ_GATE_TIME + GAP)
-        latest = max(latest, earliest)
+        if earliest > latest:
+            frequency = np.hypot(transmon_frequency(PHI_SWAP)-FC, 2*G_TC/TWOPI)
+            latest = earliest + (min(1., max(.04, 2/frequency)) if frequency > 1e-12 else .04)
     earliest = min(earliest, latest)
     if samples is None:
         frequency = np.hypot(transmon_frequency(PHI_SWAP)-FC, 2*G_TC/TWOPI)
         samples = min(65,max(17,int(np.ceil(4*(latest-earliest)*frequency))+1))
     candidates = np.linspace(earliest, latest, samples) if earliest < latest else np.array([latest])
+    h = retrieval_model(source, cleanup_start=latest)[0]
     inputs = ((1, 0), (0, 1), (1, 1), (1, -1), (1, 1j), (1, -1j))
     options = {"store_states": True, "atol": 1e-11, "rtol": 1e-9,
                "method": "dop853", "max_step": MAX_STEP, "nsteps": 100000}
     scores = np.zeros(len(candidates))
-    base_ops = read_c_ops(source)
+    base_ops = read_c_ops(source, cleanup_start=latest)
     for index, (alpha, beta) in enumerate(inputs):
         progress.update(index/len(inputs), f"Preparing read input {index+1}/{len(inputs)}")
         print(f"Optimizing constant-flux readout: input {index + 1}/6", flush=True)
@@ -1572,24 +1592,24 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
             _WRITE_GATE_TIME = None
             configure_write_atom_start(_NOMINAL_AC[0],honor_tc=True)
             _WRITE_TIMING_ACTIVE = False
-        if _SETTINGS['SWITCH_DESTINATION_COUPLING']:
-            write_gate = cavity_gate_time('write')
+        if _SETTINGS['COUPLING_SWITCH_MODE'] != 'always_on':
+            write_gate = selected_coupling_switch('write')
             _WRITE_GATE_TIME = write_gate['time_us']
             configure_write_atom_start(_NOMINAL_AC[0],honor_tc=True)
         with progress.scope(work['start'],work['selected']*.35,'Searching round-trip write timing'):
             write_timing_search = (optimize_constant_field_write() if _SETTINGS['CONSTANT_FIELD'] else
-                                   optimize_constant_field_write(atom_start=_WRITE_GATE_TIME) if _WRITE_GATE_TIME is not None else
+                                   optimize_constant_field_write(atom_start=max(_WRITE_GATE_TIME,PREP[1]+GAP)) if _WRITE_GATE_TIME is not None else
                                    optimize_constant_flux_write())
         configure_write_atom_start(write_timing_search['atom_start_us'],mapping_start=write_timing_search.get('mapping_start_us'))
         _WRITE_TIMING_ACTIVE = True
     timing_search = None
     read_gate = None
     if _SETTINGS["CONSTANT_FLUX"] or _SETTINGS["CONSTANT_FIELD"]:
-        if _SETTINGS['SWITCH_DESTINATION_COUPLING']:
-            progress.update(work['start'], 'Finding cavity peak for destination coupling')
-            read_gate = cavity_gate_time('read',source)
+        if _SETTINGS['COUPLING_SWITCH_MODE'] != 'always_on':
+            progress.update(work['start'], 'Setting destination coupling time')
+            read_gate = selected_coupling_switch('read',source)
             _READ_GATE_TIME = read_gate['time_us']
-            print(f"Idealized transmon-cavity coupling switch: {_READ_GATE_TIME*1000:.2f} ns; reference cavity photons {read_gate['mean_photons']:.3f}", flush=True)
+            print(f"Idealized transmon-cavity coupling switch ({read_gate['mode']}): {_READ_GATE_TIME*1000:.2f} ns", flush=True)
         with progress.scope(work['selected']*(.35 if write_timing_search else 0),work['selected']*.8,'Searching read timing'):
             timing_search = (optimize_constant_field_readout(source,roundtrip=roundtrip) if _SETTINGS['CONSTANT_FIELD']
                              else optimize_constant_flux_readout(source,roundtrip=roundtrip))
@@ -1730,8 +1750,10 @@ def retrieval_main(source="hyperfine", roundtrip=False, check=False, save=False)
         summary_rows = tolerance_bands.table_rows(summary_rows, bands, "read")
         if read_gate:
             suffix = ["—"] if bands else []
-            summary_rows[1:1] = [["Idealized transmon coupling switch", f"{read_gate['time_us']*1000:.2f} ns", *suffix],
-                                 ["Reference cavity photons at switch", f"{read_gate['mean_photons']:.3f}", *suffix]]
+            rows = [[f"Idealized transmon coupling switch ({read_gate['mode']})", f"{read_gate['time_us']*1000:.2f} ns", *suffix]]
+            if read_gate['mean_photons'] is not None:
+                rows.append(["Reference cavity photons at switch", f"{read_gate['mean_photons']:.3f}", *suffix])
+            summary_rows[1:1] = rows
         if cavity_peak:
             suffix = ["—"] if bands else []
             summary_rows[1:1] = [["Selected input: cavity photon peak", f"{cavity_peak['time_us']*1000:.2f} ns; n̄={cavity_peak['mean_photons']:.3f}", *suffix]]

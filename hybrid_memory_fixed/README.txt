@@ -36,7 +36,9 @@ The couplings, peak controls and durations have been calibrated using the full,
 always-on-coupling Hamiltonian for writing and independent readout. The rounded
 shape, 5 us storage, lifetimes and dephasing rates are retained. This is a local
 numerical calibration of an illustrative model, not an experimental calibration
-or proof of a global optimum. Residual coherent errors and finite dissipation
+or proof of a global optimum. The idealized destination-switch option changes
+that Hamiltonian for selected constant-control runs, so the original
+calibration does not carry over unchanged. Residual coherent errors and finite dissipation
 prevent exactly 100% fidelity. Changing device inputs requires recalibration.
 Restart the panel and select Reset defaults to use the new values. Loading old
 settings retains saved values; absent pulse multipliers take the new defaults.
@@ -164,30 +166,31 @@ E_swap = V_SWAP/GAP_CM + STRAY_FIELD; the atomic transition can be detuned.
 Reducing FC by 100 MHz increases both peak detunings by +100 MHz. Changing FC alone
 does not retune either transition or change the nominal swap holds.
 The panel reports both detunings. Detuning reduces excitation transfer.
-For Atom to transmon with Hold flux constant enabled, the readout samples
-17 cleanup start times between the end of the atom-cavity pulse (plus the
-configured gap) and the original cleanup start. It selects the largest mean
-unconditional joint fidelity over the six cardinal input states, with no
-phase correction. The displayed retrieval ends after the selected cleanup;
-the purple dashed line marks that time. This is a sampled optimum over that
-finite window, not a guarantee of the global optimum. The flux remains
-constant, so the excitation can continue to oscillate after the marked time.
-For Transmon to atom with Hold flux constant, the atom pulse starts at the
-first estimated transmon-cavity exchange peak after preparation and the gap.
-The estimate uses the transmon-cavity coupling and fixed detuning; mapping
-follows the atom pulse. The full simulation calculates the resulting fidelity.
-This quick timing estimate does not guarantee optimal transfer. Large
-transmon-cavity detuning can still make the transfer inefficient. With a
-nonconstant electric field, the write-store-read round trip retains its timing.
-For Hold electric field constant, there is no voltage pulse to wait for.
-Writing uses one excited-input pilot simulation with the actual controls to
-find the first substantial r1 population peak after the preceding pulse and
-the configured gap. It schedules the mapping pulse at that peak and reports
-the wait. The finite mapping pulse and ongoing couplings can shift the best
-fidelity, so this is a timing estimate, not a fidelity guarantee. If flux is
-pulsed, its actual pulse duration is retained. The write preview shows a
-coupling-based estimate; the full simulation determines the mapping start.
-Read timing uses coupling-based exchange estimates.
+When Hold flux constant or Hold electric field constant is enabled, write and
+read use sampled timing searches. The objective is the mean unconditional
+joint fidelity over the six cardinal input states, with no phase correction.
+The Couplings tab has a destination coupling on/off control for standard
+transfers with at least one constant control. On keeps the coupling active
+throughout. Off enables separate write/read coupling start times in ns, measured
+from the start of the respective transfer. The destination coupling is then
+zero until that time and turns on instantaneously. This idealized model assumes
+suitable switchable hardware and is not implied by a constant flux or field.
+The red line marks the switch; it is not a photon measurement. Legacy automatic
+switch settings load as manual with the saved manual times (zero if missing);
+review these times before running. With neither control constant, this control
+does not change the standard fully pulsed model.
+With constant flux only and a destination switch enabled, the atomic voltage
+pulse begins at the switch time, or after preparation if that is later; writing
+then searches the final mapping start. With always_on, writing varies the
+atom-pulse start. Reading varies
+the final cleanup start. With constant field, writing varies the mapping
+start; reading varies the flux-pulse start, or the cleanup start when flux is
+also constant. Constant controls retain their entered values. The result shows
+the sampled window and whether the best result is at its boundary. This is
+not a global optimum or a guarantee for every input. Before a matching run the
+preview shows nominal timing; afterward it shows the actual searched controls.
+Round-trip return can reward states that
+never left the transmon. Fully pulsed controls retain configured timings.
 The Cavity and transmon tab also displays the interaction and parked
 detunings live, and identifies whether the interaction is resonant or detuned.
 Old F_SWAP_TARGET JSON entries must be removed. Replace F_T_INTERACTION
@@ -447,7 +450,15 @@ The Equations and notes subtab retains the model reference. Choose Write or Read
 selecting one direction in the main Output selector also selects it in the preview.
 Control pulses and detunings update as parameters change. Set timing with the
 write/read pulse-delay fields; there is no separate delay slider in the preview.
-Pulse overlap and actual peak-to-peak delay are displayed in ns.
+Before a run the preview shows nominal controls, which can differ from searched
+constant-control timing. Once a matching write or read report is produced, the
+preview displays that run's actual control traces, pulse times and idealized
+coupling-switch marker. For Both transfer directions it selects the direction
+of the most recently produced plot; use the selector to inspect the other.
+Changing settings returns the preview to nominal until a matching run exists.
+In Manual coupling mode the preview also marks the entered switch time in red;
+the remaining nominal pulse timings are finalized by the simulation.
+For pulsed controls, pulse overlap and peak-to-peak delay are displayed in ns.
 Drag the time cursor or click a plot to inspect flux, voltage, and detunings.
 The preview contains only control and detuning plots; it does not run a background
 population simulation. The plot toolbar supports zoom and export. The preview timeline ends after

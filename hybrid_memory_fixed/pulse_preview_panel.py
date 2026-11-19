@@ -1,4 +1,6 @@
 """Embedded interactive preview of pulse timing and detuning."""
+import json
+from pathlib import Path
 import numpy as np
 import tkinter as tk
 from tkinter import ttk
@@ -9,8 +11,9 @@ from pulse_preview import control_preview
 
 
 class PulsePreview:
-    def __init__(self, parent, root, get_settings, is_visible):
+    def __init__(self, parent, root, get_settings, is_visible, get_run=None):
         self.root, self.get_settings = root, get_settings
+        self.get_run = get_run or (lambda: None)
         self.is_visible = is_visible
         self.closed = False
         self.controls = None
@@ -29,7 +32,7 @@ class PulsePreview:
                      state='readonly', width=7).pack(side='left', padx=5)
         ttk.Button(controls, text='Refresh', command=self.refresh_now).pack(side='right')
         ttk.Label(parent, textvariable=self.timing).grid(row=1, column=0, sticky='w', pady=(4, 0))
-        self.figure = Figure(figsize=(5, 3.4), dpi=100, layout='constrained')
+        self.figure = Figure(figsize=(6.5, 4.6), dpi=100, layout='constrained')
         self.figure.get_layout_engine().set(h_pad=0.06, hspace=0.08)
         self.axes = self.figure.subplots(3, 1, sharex=True)
         self.voltage_axis = self.axes[0].twinx()
@@ -75,6 +78,31 @@ class PulsePreview:
         if self.is_visible():
             self.schedule()
 
+    def report_ready(self, direction, select=False):
+        if direction not in ('write', 'read'):
+            return
+        try:
+            if self.matching_report(self.get_settings(), direction) is None:
+                return
+        except (OSError, ValueError, TypeError, KeyError):
+            return
+        if select:
+            self.direction.set(direction.title())
+        self.schedule()
+
+    def matching_report(self, settings, direction):
+        run = self.get_run()
+        if not run or run.get('settings') != settings or not run.get('output_directory') or run.get('sweep'):
+            return None
+        path = Path(run['output_directory']) / (direction + '.json')
+        if not path.is_file():
+            return None
+        with path.open(encoding='utf-8') as file:
+            report = json.load(file)
+        if report.get('metadata', {}).get('protocol') == 'simultaneous_cavity_resonance':
+            return None
+        return report
+
     def schedule(self, *_):
         if self.closed:
             return
@@ -87,16 +115,21 @@ class PulsePreview:
     def refresh_controls(self):
         self.refresh_after = None
         try:
-            self.controls = control_preview(self.get_settings(), self.selected_direction())
-        except (ValueError, TypeError, KeyError) as exc:
+            settings = self.get_settings()
+            direction = self.selected_direction()
+            report = self.matching_report(settings, direction)
+            self.controls = control_preview(settings, direction, report=report)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
             self.controls = None
             self.draw_empty('Enter valid model parameters')
             self.status.set(str(exc))
             self.readout.set('Preview unavailable while a parameter is invalid.')
             return
         self.draw()
-        if self.controls['settings']['CONSTANT_FIELD'] and self.selected_direction() == 'write':
-            self.status.set('Preview uses an estimated mapping time; the simulation selects it from the atomic dynamics.')
+        if self.controls['source'] == 'simulation':
+            self.status.set(f"{direction.title()} controls from the matching simulation result.")
+        elif self.controls['settings']['CONSTANT_FIELD'] or self.controls['settings']['CONSTANT_FLUX']:
+            self.status.set(f'{direction.title()} preview is nominal; run the simulation to see its searched timing.')
         else:
             self.status.set('Nominal controls. Drag the time cursor or click a plot to inspect values.')
 
@@ -149,15 +182,20 @@ class PulsePreview:
         for axis in self.axes:
             axis.grid(alpha=.18)
             axis.tick_params(labelsize=8)
+            if data['coupling_switch_us'] is not None:
+                axis.axvline(data['coupling_switch_us']*1000, color='red', linestyle='-.', lw=1)
             self.cursors.append(axis.axvline(self.cursor_ns.get(), color='black', alpha=.45, lw=.8))
         finish_ns = max(float(times[-1]), 1e-6)
         self.axes[1].set_xlim(0, finish_ns)
         self.time_slider.configure(to=finish_ns)
         self.cursor_ns.set(min(max(0, self.cursor_ns.get()), finish_ns))
         value = data['settings'][self.selected_direction().upper()+'_PULSE_DELAY_NS']
-        mode = 'auto' if value is None else 'manual'
-        self.timing.set(f"{self.direction.get()} delay {data['delay_ns']:+.3f} ns ({mode})   •   "
-                        f"Pulse overlap {data['overlap_ns']:.3f} ns   •   End {finish_ns:.3f} ns")
+        mode = 'simulated' if data['source'] == 'simulation' else ('nominal' if value is None else 'manual, nominal')
+        if data['settings']['CONSTANT_FLUX'] or data['settings']['CONSTANT_FIELD']:
+            self.timing.set(f"{self.direction.get()} ({mode})   •   End {finish_ns:.3f} ns; a control is constant")
+        else:
+            self.timing.set(f"{self.direction.get()} delay {data['delay_ns']:+.3f} ns ({mode})   •   "
+                            f"Pulse overlap {data['overlap_ns']:.3f} ns   •   End {finish_ns:.3f} ns")
         self.toolbar.update()
         self.inspect_time()
 

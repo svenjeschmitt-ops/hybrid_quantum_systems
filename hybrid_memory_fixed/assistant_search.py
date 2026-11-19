@@ -65,6 +65,8 @@ def locked_controls(config):
         keys+=['CONSTANT_FIELD','V_SWAP','GAP_CM','STRAY_FIELD','E_PARK']
     if config['CONSTANT_FLUX']:
         keys+=['CONSTANT_FLUX','PHI_SWAP','PHI_PARK']
+    if config['CONSTANT_FLUX'] or config['CONSTANT_FIELD']:
+        keys+=['COUPLING_SWITCH_MODE','WRITE_COUPLING_START_NS','READ_COUPLING_START_NS']
     return {key:config[key] for key in keys}
 
 
@@ -428,11 +430,23 @@ def screen(b, mode, stage='joint'):
     import numpy as np
     import qutip as qt
     options=dict(store_states=True,atol=1e-11,rtol=1e-9,method='dop853',max_step=b.MAX_STEP,nsteps=100000)
+    switched = (not mode.startswith('Simultaneous cavity resonance:') and
+                b._SETTINGS['COUPLING_SWITCH_MODE'] != 'always_on' and
+                (b._SETTINGS['CONSTANT_FLUX'] or b._SETTINGS['CONSTANT_FIELD']))
+    if switched:
+        if stage in ('tc','ac') or 'write' in MODES[mode]:
+            b._WRITE_GATE_TIME = b.selected_coupling_switch('write')['time_us']
+            if b._SETTINGS['CONSTANT_FLUX'] and not b._SETTINGS['CONSTANT_FIELD']:
+                b.configure_write_atom_start(max(b._WRITE_GATE_TIME, b.PREP[1]+b.GAP))
+            else:
+                b.configure_write_atom_start(b._NOMINAL_AC[0],honor_tc=True)
+        if stage == 'joint' and 'read' in MODES[mode]:
+            b._READ_GATE_TIME = b.selected_coupling_switch('read')['time_us']
     if not mode.startswith('Simultaneous cavity resonance:'):
         read_tc,read_ac=pulse_intervals(b._SETTINGS,max(b.T_OPT,b.T_OPT_1)+b.GAP,b.TC_DURATION,b.AC_DURATION,'read')
         separated = all(b.TC[1] <= b.AC[0]+1e-12 if direction=='write' else read_ac[1] <= read_tc[0]+1e-12
                         for direction in MODES[mode])
-        if separated:
+        if separated and not switched:
             return sequential_screen(b, mode, stage)
     if mode.startswith('Simultaneous cavity resonance:'):
         from simultaneous_coupling import model
@@ -454,7 +468,8 @@ def screen(b, mode, stage='joint'):
     scores=[]
     if stage in ('tc','ac') or 'write' in MODES[mode]:
         end=b.TC[1] if stage=='tc' else b.MAP[1]
-        times=np.unique([0.,*[x for pair in (b.PREP,b.TC,b.AC,b.MAP) for x in pair if x<=end]])
+        times=np.unique([0.,*[x for pair in (b.PREP,b.TC,b.AC,b.MAP) for x in pair if x<=end],
+                         *([b._WRITE_GATE_TIME] if switched and b._WRITE_GATE_TIME <= end else [])])
         initial=qt.tensor((b.g+b.e).unit() if stage=='joint' else b.e,qt.basis(b.NC,0),b.h0)
         final=qt.sesolve(b.H,initial,times,options=options).states[-1]
         target=qt.tensor(b.g,qt.basis(b.NC,1),b.r0) if stage=='tc' else qt.tensor(b.g,qt.basis(b.NC,0),b.h1)
@@ -467,7 +482,8 @@ def screen(b, mode, stage='joint'):
             scores.append(real_probability(qt.expect(target.proj(),final)))
     if stage=='joint' and 'read' in MODES[mode]:
         h,_,stages,*_=b.retrieval_model()
-        times=np.unique([0.,*[x for _,pair in stages for x in pair]])
+        times=np.unique([0.,*[x for _,pair in stages for x in pair],
+                         *([b._READ_GATE_TIME] if switched and b._READ_GATE_TIME <= max(pair[1] for _,pair in stages) else [])])
         initial=b.hold_memory(b.retrieval_initial(1,1),noisy=False)
         final=qt.sesolve(h,initial,times,options=options).states[-1]
         zero=qt.tensor(b.g,qt.basis(b.NC,0),b.h0)

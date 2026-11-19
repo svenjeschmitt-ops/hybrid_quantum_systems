@@ -70,7 +70,7 @@ class ConstantControlTests(unittest.TestCase):
                     self.assertEqual(config, original)
 
     def test_panel_symbols_render(self):
-        for key in ('CONSTANT_FLUX', 'CONSTANT_FIELD'):
+        for key in ('CONSTANT_FLUX', 'CONSTANT_FIELD', 'COUPLING_SWITCH_MODE', 'WRITE_COUPLING_START_NS', 'READ_COUPLING_START_NS'):
             self.assertIn(key, PARAMETER_SYMBOLS)
             self.assertTrue(parameter_symbol_png(key).startswith(b'\x89PNG'))
 
