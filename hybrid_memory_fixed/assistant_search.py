@@ -51,6 +51,21 @@ def requested_target(question):
     return value
 
 
+def requested_tc_coupling_bounds(question):
+    """Extract an explicitly stated transmon–cavity coupling interval in MHz."""
+    if not (re.search(r'(?:coupl|couling)\w*', question, re.I) and
+            re.search(r'transmon', question, re.I) and re.search(r'cavity', question, re.I)):
+        return None
+    number = r'(\d+(?:\.\d+)?)'
+    match = re.search(r'(?:between|from)\s*' + number + r'\s*(?:mhz)?\s*(?:to|and|–|—|-)\s*' + number + r'\s*mhz\b', question, re.I)
+    if not match:
+        return None
+    low, high = map(float, match.groups())
+    if not (math.isfinite(low) and math.isfinite(high) and 0 < low < high):
+        raise ValueError('Transmon-cavity coupling bounds must be positive and increasing.')
+    return [low, high]
+
+
 def constant_field_requested(question):
     return bool(re.search(
         r'field\b.{0,80}(?:stay|remain|kept|keep|must|need).{0,40}(?:constant|fixed|unchanged|exact)|'
@@ -80,7 +95,7 @@ def field_diagnostics(config):
                 atomic_detuning_MHz=frequency-config['FC'])
 
 
-def physical_search_space(c, mode, vary_cavity=False):
+def physical_search_space(c, mode, vary_cavity=False, vary_rydberg=False):
     """Search applied controls directly when a quadratic inversion is unavailable."""
     import numpy as np
     atom = AtomicModel(c)
@@ -98,13 +113,17 @@ def physical_search_space(c, mode, vary_cavity=False):
             else:
                 raise ValueError('A variable cavity search needs a tunable atomic transition or a constant field.')
         add('FC', low, high)
+    if vary_rydberg:
+        # Coordinate is peak atomic detuning; decode it jointly with field.
+        add('F_A_ZERO', -200., 200.)
     if mode.startswith('Simultaneous cavity resonance:'):
         add('SIM_HOLD_SCALE', .4, 2.5, True)
         if not (c['CONSTANT_FLUX'] and c['CONSTANT_FIELD']):
             add('SIM_RAMP', c['SIM_RAMP']*.2, c['SIM_RAMP']*5, True)
     else:
         if not c['CONSTANT_FLUX']:
-            add('PHI_SWAP', max(0., c['PHI_SWAP']-.08), min(.5, c['PHI_SWAP']+.08))
+            add('PHI_SWAP', 0. if vary_rydberg else max(0., c['PHI_SWAP']-.08),
+                .5 if vary_rydberg else min(.5, c['PHI_SWAP']+.08))
         add('TC_PULSE_SCALE', .4, 25., True)
         if not c['CONSTANT_FIELD']:
             field = calculated_swap_field(c)
@@ -127,28 +146,75 @@ def physical_search_space(c, mode, vary_cavity=False):
     keys = [key for key, _, _ in entries]
     bounds = [bound for _, bound, _ in entries]
     def encode(values):
-        return np.clip([math.log(values[key]) if log else values[key] for key, _, log in entries],
-                       [low for low, high in bounds], [high for low, high in bounds])
+        point = []
+        for key, _, log in entries:
+            if key == 'F_A_ZERO' and vary_rydberg:
+                value = float(AtomicModel(values).transition(calculated_swap_field(values)))-values['FC']
+            else:
+                value = math.log(values[key]) if log else values[key]
+            point.append(value)
+        return np.clip(point, [low for low, high in bounds], [high for low, high in bounds])
     def decode(values):
-        return validate({**c, **{key: float(math.exp(x) if log else x)
-                                for (key, _, log), x in zip(entries, values)}})
+        changes = {key: float(math.exp(x) if log else x)
+                   for (key, _, log), x in zip(entries, values) if key != 'F_A_ZERO' or not vary_rydberg}
+        candidate = {**c, **changes}
+        if vary_rydberg:
+            detuning = float(values[keys.index('F_A_ZERO')])
+            field = calculated_swap_field(candidate)
+            candidate['F_A_ZERO'] = candidate['FC'] + detuning - (c['K_R1']-c['K_R0'])*field**2
+        return validate(candidate)
     seed = dict(c)
-    try:
-        if 'PHI_SWAP' in keys:
+    if vary_rydberg:
+        seed['F_A_ZERO'] = max(1., c['FC']-(c['K_R1']-c['K_R0'])*calculated_swap_field(c)**2)
+    if 'PHI_SWAP' in keys:
+        try:
             seed['PHI_SWAP'] = resonant_flux(c)
-        if 'V_SWAP' in keys:
-            seed['V_SWAP'] = c['GAP_CM']*(resonant_field(c)-c['STRAY_FIELD'])
-    except ValueError:
-        pass
-    return keys, bounds, encode(c), [encode(c), encode(seed)], decode
+        except ValueError:
+            seed['PHI_SWAP'] = 0. if c['FC'] > calculated_transmon_frequency(c, 0) else .5
+    seeds = [encode(c), encode(seed)]
+    if vary_rydberg and 'V_SWAP' in keys:
+        voltage_bounds = bounds[keys.index('V_SWAP')]
+        for fraction in (.15, .5, .85):
+            trial = dict(seed, V_SWAP=voltage_bounds[0]+fraction*(voltage_bounds[1]-voltage_bounds[0]))
+            trial['F_A_ZERO'] = max(1., trial['FC']-(c['K_R1']-c['K_R0'])*calculated_swap_field(trial)**2)
+            seeds.append(encode(trial))
+    return keys, bounds, encode(c), seeds, decode
 
 
-def search_space(config, mode, vary_cavity=False):
+def search_space(config, mode, vary_cavity=False, tc_coupling_bounds=None):
     """Peak detunings and log durations avoid ill-scaled flux/voltage coordinates."""
     import numpy as np
     c = validate(config)
+    if tc_coupling_bounds is not None:
+        if len(tc_coupling_bounds) != 2:
+            raise ValueError('Transmon-cavity coupling bounds require two values.')
+        low, high = map(float, tc_coupling_bounds)
+        if not (math.isfinite(low) and math.isfinite(high) and 0 < low < high):
+            raise ValueError('Transmon-cavity coupling bounds must be positive and increasing.')
+        keys, bounds, current, seeds, base_decode = search_space(c, mode, vary_cavity)
+        coupling = coupling_strengths(c)
+        log_bounds = (math.log(low), math.log(high))
+        initial = float(np.clip(math.log(coupling['transmon_coupling_MHz']), *log_bounds))
+        def decode(values):
+            candidate = base_decode(values[:-1])
+            return validate({**candidate, 'DIRECT_COUPLING': 1,
+                             'G_TC_MHZ': math.exp(float(values[-1])),
+                             'G_AC_MHZ': coupling['atom_coupling_MHz'] if not c['DIRECT_COUPLING'] else c['G_AC_MHZ']})
+        augmented_seeds = [np.r_[seed, initial] for seed in seeds]
+        augmented_seeds += [np.r_[seeds[-1], math.log(value)] for value in (low, math.sqrt(low*high), high)]
+        return keys+['G_TC_MHZ'], bounds+[log_bounds], np.r_[current, initial], augmented_seeds, decode
     if mode not in MODES:
         raise ValueError('Unsupported search output mode.')
+    # When the current atomic or transmon resonance is unreachable, search
+    # physical controls and the Rydberg splitting instead of rejecting early.
+    if not mode.startswith('Simultaneous cavity resonance:'):
+        stark = c['K_R1']-c['K_R0']
+        atom_unreachable = (not c['CONSTANT_FIELD'] and
+                            (stark == 0 or (c['FC']-c['F_A_ZERO'])*stark <= 0))
+        transmon_unreachable = (not c['CONSTANT_FLUX'] and
+                                not calculated_transmon_frequency(c,.5) < c['FC'] < calculated_transmon_frequency(c,0))
+        if atom_unreachable or transmon_unreachable:
+            return physical_search_space(c, mode, vary_cavity, vary_rydberg=True)
     if (any(c[key] is not None for key in active_delay_keys(mode))
             and not mode.startswith('Simultaneous cavity resonance:')):
         return physical_search_space(c, mode, vary_cavity)
@@ -221,7 +287,7 @@ def search_space(config, mode, vary_cavity=False):
     else:
         abound = (max(abound[0],c['F_A_ZERO']-c['FC']+1e-6),abound[1])
     if (not c['CONSTANT_FLUX'] and tbound[0]>=tbound[1]) or (not c['CONSTANT_FIELD'] and abound[0]>=abound[1]):
-        raise ValueError('No reachable resonance-crossing interval exists within the search bounds.')
+        return physical_search_space(c, mode, vary_cavity, vary_rydberg=True)
     keys = ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE','GAP','OMEGA','OMEGA_1']
     bounds = [tbound,(math.log(.4),math.log(25)),abound,(math.log(.4),math.log(25)),(0.,max(.03,c['GAP']*2)),(math.log(c['OMEGA']*.5),math.log(c['OMEGA']*2)),(math.log(c['OMEGA_1']*.5),math.log(c['OMEGA_1']*2))]
     def encode(values):
@@ -493,10 +559,10 @@ def screen(b, mode, stage='joint'):
     return min(scores)
 
 
-def optimize_controls(config, mode, target, directory, max_evaluations=320, evaluator=None, vary_cavity=False):
+def optimize_controls(config, mode, target, directory, max_evaluations=320, evaluator=None, vary_cavity=False, tc_coupling_bounds=None):
     import numpy as np
     from scipy.optimize import minimize, differential_evolution
-    keys,bounds,current,seeds,decode=search_space(config,mode,vary_cavity)
+    keys,bounds,current,seeds,decode=search_space(config,mode,vary_cavity,tc_coupling_bounds)
     offset = int(keys[0] == 'FC')
     seeded = keys[offset:offset+4] == ['PHI_SWAP','TC_PULSE_SCALE','V_SWAP','AC_PULSE_SCALE'] and len(keys) == offset+7
     if seeded:
@@ -601,7 +667,7 @@ def optimize_controls(config, mode, target, directory, max_evaluations=320, eval
     return result
 
 
-def validate_search_result(result, config, mode, target, vary_cavity=None):
+def validate_search_result(result, config, mode, target, vary_cavity=None, tc_coupling_bounds=None):
     c=validate(config)
     if result['mode']!=mode or result['target']!=target or result['baseline']['settings']!=c:
         raise ValueError('Search evidence does not match the captured request.')
@@ -612,8 +678,17 @@ def validate_search_result(result, config, mode, target, vary_cavity=None):
     frequency_free=bool(result.get('vary_cavity',False))
     if vary_cavity is not None and frequency_free!=bool(vary_cavity):
         raise ValueError('Cavity-frequency search permissions do not match the request.')
-    space=search_space(c,mode,frequency_free)
+    coupling_bounds=result.get('tc_coupling_bounds')
+    if tc_coupling_bounds is not None and coupling_bounds != list(tc_coupling_bounds):
+        raise ValueError('Transmon-cavity coupling search bounds do not match the request.')
+    space=search_space(c,mode,frequency_free,coupling_bounds)
     allowed=set(space[0])
+    if coupling_bounds is not None:
+        allowed.update(('DIRECT_COUPLING', 'G_AC_MHZ'))
+        if not coupling_bounds[0]*(1-1e-12) <= best['settings']['G_TC_MHZ'] <= coupling_bounds[1]*(1+1e-12) and best['settings'] != c:
+            raise ValueError('Found transmon-cavity coupling is outside the requested bounds.')
+        if best['settings'] != c and (best['settings']['DIRECT_COUPLING'] != 1 or not math.isclose(best['settings']['G_AC_MHZ'], coupling_strengths(c)['atom_coupling_MHz'], rel_tol=1e-12)):
+            raise ValueError('The search must preserve the atom-cavity coupling.')
     if frequency_free and not space[1][0][0]<=best['settings']['FC']<=space[1][0][1]:
         raise ValueError('Found cavity frequency is outside the declared search interval.')
     locks=locked_controls(c)
@@ -635,10 +710,22 @@ def search_answer(result, config, mode, target):
     result=validate_search_result(result,config,mode,target)
     lines=[f"Target: **{target:.2%}** minimum joint fidelity for logical 0, 1 and + across the selected directions.",
            f"Validated score: **{result['baseline_score']:.4%} → {result['best_score']:.4%}**.",
-           ('Storage, noise, basis and tolerance bounds were held fixed; cavity frequency was allowed to vary.' if result['vary_cavity'] else 'Storage, noise, cavity frequency, basis and tolerance bounds were held fixed.'),'',
-           '| Parameter | Current | Found |','|---|---:|---:|']
+           ('The zero-field Rydberg splitting was included in the search; confirm that the proposed value corresponds to an available atomic transition and compatible optical settings.' if 'F_A_ZERO' in result.get('searched_parameters', []) else 'The zero-field Rydberg splitting was held fixed.'),
+           ('Storage, noise, basis and tolerance bounds were held fixed; cavity frequency was allowed to vary.' if result['vary_cavity'] else 'Storage, noise, cavity frequency, basis and tolerance bounds were held fixed.')]
+    if result.get('tc_coupling_bounds') is not None:
+        low, high = result['tc_coupling_bounds']
+        lines += ['', f'Transmon–cavity coupling searched from {low:g} to {high:g} MHz (g/(2π)); atom–cavity coupling was held fixed.']
+        if not config['DIRECT_COUPLING']:
+            lines += ['The proposal uses manual couplings and preserves the original atom–cavity coupling.']
+    lines += ['', '| Parameter | Current | Found |', '|---|---:|---:|']
     for key in result.get('searched_parameters',[]):
-        lines.append(f"| {key} | {config[key]} | {result['best']['settings'][key]} |")
+        current_value = coupling_strengths(config)['transmon_coupling_MHz'] if key == 'G_TC_MHZ' and not config['DIRECT_COUPLING'] else config[key]
+        lines.append(f"| {key} | {current_value} | {result['best']['settings'][key]} |")
+    if not config['CONSTANT_FLUX']:
+        transmon_max = calculated_transmon_frequency(config, 0.)
+        transmon_min = calculated_transmon_frequency(config, .5)
+        if not transmon_min <= config['FC'] <= transmon_max and not result['vary_cavity']:
+            lines += ['', f"Cavity frequency {config['FC']:.6g} MHz is outside the transmon tuning range ({transmon_min:.6g}–{transmon_max:.6g} MHz). Changing the atomic transition or field alone cannot bring the transmon into resonance; consider allowing cavity-frequency changes or revisiting transmon parameters."]
     if result['locked_controls']:
         lines+=['','Locked controls preserved: '+', '.join(f'{key}={value}' for key,value in result['locked_controls'].items())+'.']
     diagnostic=result['field_diagnostics']
@@ -654,17 +741,18 @@ def search_answer(result, config, mode, target):
     elif not result['model_valid']:
         lines+=['','**Target not certified at this fixed field.** The model predicts a nonpositive atomic transition, so optimization was skipped. No field settings were changed and no proposal is offered.']
     else:
-        lines+=['','**Target not reached within this search budget.** The best tested result remains below the request; no target-reaching proposal is offered.']
+        lines+=['','**Target not reached within this search budget.** The best validated settings remain below the request and can be previewed and applied if desired.']
     lines+=['','Screening used noiseless endpoint populations; the reported fidelities are from full noisy validation. '
             'This is a bounded search, not a global optimum or a guarantee for all qubit inputs or unsampled errors.',
             'Numerical evidence: '+result.get('source','local search')]
-    if result['target_reached'] and result['changes']:
+    if result['model_valid'] and result['changes']:
+        outcome = 'meeting' if result['target_reached'] else 'below'
         lines+=['','```panel-settings',json.dumps(dict(changes=result['changes'],evidence='measured simulation result',
-            reason=f"Multi-parameter search validated minimum fidelity {result['best_score']:.6%}, meeting target {target:.2%}.")),'```']
+            reason=f"Multi-parameter search validated minimum fidelity {result['best_score']:.6%}, {outcome} the {target:.2%} target.")),'```']
     return '\n'.join(lines)
 
 
-def worker(config, mode, target, directory, max_evaluations=320, vary_cavity=False):
+def worker(config, mode, target, directory, max_evaluations=320, vary_cavity=False, tc_coupling_bounds=None):
     directory=Path(directory)
     def validate_point(c,label):
         folder=directory/label;folder.mkdir(exist_ok=True)
@@ -674,28 +762,28 @@ def worker(config, mode, target, directory, max_evaluations=320, vary_cavity=Fal
         return evaluate_backend(b,mode,folder)
     baseline=validate_point(config,'baseline')
     best=baseline
-    screening=dict(parameters=search_space(config,mode,vary_cavity)[0],evaluations=0,candidates=[])
+    screening=dict(parameters=search_space(config,mode,vary_cavity,tc_coupling_bounds)[0],evaluations=0,candidates=[])
     diagnostic=field_diagnostics(config)
     model_valid=diagnostic is None or diagnostic['atomic_transition_MHz']>0
     if model_valid and _score(baseline,mode)<target:
-        screening=optimize_controls(config,mode,target,directory,max_evaluations,vary_cavity=vary_cavity)
+        screening=optimize_controls(config,mode,target,directory,max_evaluations,vary_cavity=vary_cavity,tc_coupling_bounds=tc_coupling_bounds)
         for index,candidate in enumerate(screening['candidates']):
             point=validate_point(candidate['settings'],f'candidate_{index}')
             if _score(point,mode)>_score(best,mode):
                 best=point
             if _score(best,mode)>=target:
                 break
-    result=dict(mode=mode,target=target,vary_cavity=vary_cavity,baseline=baseline,best=best,
+    result=dict(mode=mode,target=target,vary_cavity=vary_cavity,tc_coupling_bounds=tc_coupling_bounds,baseline=baseline,best=best,
                 searched_parameters=screening['parameters'],screening_evaluations=screening['evaluations'])
     return validate_search_result(result,config,mode,target)
 
 
-def run_target_search(config, mode, target, cancelled, project_root, on_progress=None, timeout=2400, vary_cavity=False):
+def run_target_search(config, mode, target, cancelled, project_root, on_progress=None, timeout=2400, vary_cavity=False, tc_coupling_bounds=None):
     from codex_assistant import _stop
     config=validate(config)
     if not 0<target<=1:
         raise ValueError('Target fidelity must be greater than 0 and at most 100%.')
-    search_space(config,mode,vary_cavity)
+    search_space(config,mode,vary_cavity,tc_coupling_bounds)
     if cancelled.is_set():
         raise ComparisonCancelled()
     root=Path(project_root)/'output'/'assistant_searches';root.mkdir(parents=True,exist_ok=True)
@@ -706,6 +794,8 @@ def run_target_search(config, mode, target, cancelled, project_root, on_progress
              '--output',str(output),'--mode',mode,'--target',str(target)]
     if vary_cavity:
         command.append('--vary-cavity')
+    if tc_coupling_bounds is not None:
+        command.extend(['--tc-coupling-bounds', *map(str, tc_coupling_bounds)])
     env={**os.environ,'MPLBACKEND':'Agg','HYBRID_SIM_PROGRESS':'0'};env.pop('HYBRID_STOP_FILE',None)
     with (folder/'search.log').open('w') as log:
         process=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=env,start_new_session=os.name=='posix')
@@ -734,7 +824,7 @@ def run_target_search(config, mode, target, cancelled, project_root, on_progress
                 lines=[line for line in (folder/'search.log').read_text(errors='replace').splitlines() if line.strip()]
                 reason=lines[-1][-400:] if lines else 'Worker exited without a diagnostic.'
                 raise RuntimeError('Target search failed: '+reason+' See '+str(folder/'search.log'))
-            result=validate_search_result(json.loads(output.read_text()),config,mode,target,vary_cavity)
+            result=validate_search_result(json.loads(output.read_text()),config,mode,target,vary_cavity,tc_coupling_bounds)
             result['source']=str(output.resolve())
             if result['target_reached']:
                 settings_file=folder/'optimized_settings.json'
@@ -751,7 +841,8 @@ if __name__=='__main__':
     parser.add_argument('--config',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--mode',choices=tuple(MODES),required=True);parser.add_argument('--target',type=float,required=True)
     parser.add_argument('--vary-cavity',action='store_true')
+    parser.add_argument('--tc-coupling-bounds', nargs=2, type=float)
     args=parser.parse_args()
     config=validate(json.loads(Path(args.config).read_text()))
-    result=worker(config,args.mode,args.target,Path(args.output).parent,vary_cavity=args.vary_cavity)
+    result=worker(config,args.mode,args.target,Path(args.output).parent,vary_cavity=args.vary_cavity,tc_coupling_bounds=args.tc_coupling_bounds)
     Path(args.output).write_text(json.dumps(result,allow_nan=False))

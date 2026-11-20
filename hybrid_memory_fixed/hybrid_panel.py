@@ -41,7 +41,7 @@ from parameter_sweep import SWEEP_FIELDS, sweep_configs
 from simulation_progress import parse_line as parse_progress_line
 from assistant_proposals import parse_proposal, prepare_application
 from assistant_calculations import ComparisonCancelled, reference_only, run_comparison, checked_answer
-from assistant_search import requested_target, run_target_search, search_answer, constant_field_requested, validate_search_result
+from assistant_search import requested_target, requested_tc_coupling_bounds, run_target_search, search_answer, constant_field_requested, validate_search_result
 from codex_assistant import answer as codex_answer, build_messages, check_codex
 
 MODES = [
@@ -353,19 +353,6 @@ class ParameterPanel:
                 self.pulse_preview_tabs.add(reference,text="Equations and notes")
                 equations=reference
                 equations.columnconfigure(0,weight=1)
-            if group == "Numerics":
-                equations.rowconfigure(0,weight=1)
-                self.numerics_tabs=ttk.Notebook(equations)
-                self.numerics_tabs.grid(row=0,column=0,sticky="nsew")
-                reference=ttk.Frame(self.numerics_tabs,padding=8)
-                sweep=ttk.Frame(self.numerics_tabs,padding=8)
-                sweep.columnconfigure(0,weight=1)
-                self.numerics_tabs.add(reference,text="Equations and notes")
-                self.numerics_tabs.add(sweep,text="Parameter sweep")
-                self.build_sweep_controls(sweep,0,width)
-                self.sweep_tab=sweep
-                equations=reference
-                equations.columnconfigure(0,weight=1)
             for row,(_,key,label,units,default,rule) in enumerate(f for f in FIELDS if f[0]==group and f[1] not in ("DIRECT_COUPLING","G_TC_MHZ","G_AC_MHZ")):
                 label_cell=ttk.Frame(frame)
                 label_cell.grid(row=row,column=0,sticky="w",padx=(0,8),pady=3)
@@ -398,6 +385,8 @@ class ParameterPanel:
                 self.swap_rates=tk.StringVar()
                 ttk.Label(frame,textvariable=self.swap_rates,wraplength=int(width*.4)).grid(
                     row=row+2,column=0,columnspan=3,sticky="w",pady=(12,0))
+            if group == "Numerics":
+                self.build_sweep_controls(frame,row+1,width)
             self.equation_images[group]=tk.PhotoImage(
                 master=root,data=base64.b64encode(section_equations_png(
                     group,dpi=root.winfo_fpixels("1i"),max_width=int(width*.36))).decode("ascii"))
@@ -704,6 +693,7 @@ class ParameterPanel:
             return
         try:
             target=requested_target(question)
+            tc_coupling_bounds=requested_tc_coupling_bounds(question) if target is not None else None
             settings=self.config()
             if target is not None and constant_field_requested(question) and not settings['CONSTANT_FIELD']:
                 self.assistant_status.set("Enable Hold electric field constant at entered value in the atom tab, then search again. Your field settings were not changed.")
@@ -725,7 +715,7 @@ class ParameterPanel:
         if self.assistant_preview is not None:
             self.assistant_preview.destroy()
             self.assistant_preview=None
-        self.assistant_pending={"question":question,"settings":settings,"mode":mode,"vary_cavity":vary_cavity,"fidelity_target":target}
+        self.assistant_pending={"question":question,"settings":settings,"mode":mode,"vary_cavity":vary_cavity,"fidelity_target":target,"tc_coupling_bounds":tc_coupling_bounds}
         self.assistant_request+=1
         request_id=self.assistant_request
         self.assistant_cancel=threading.Event()
@@ -739,7 +729,7 @@ class ParameterPanel:
         def worker():
             try:
                 if target is not None:
-                    result=run_target_search(settings,mode,target,cancelled,project_root,vary_cavity=vary_cavity,
+                    result=run_target_search(settings,mode,target,cancelled,project_root,vary_cavity=vary_cavity,tc_coupling_bounds=tc_coupling_bounds,
                         on_progress=lambda message:self.events.put(("assistant_progress",(request_id,message))))
                     self.events.put(("assistant_search_result",(request_id,result)))
                     self.events.put(("assistant_text",(request_id,search_answer(result,settings,mode,target))))
@@ -782,10 +772,12 @@ class ParameterPanel:
                 evidence = captured.get('target_search')
                 if evidence is None:
                     raise ValueError('No numerical target-search evidence is available.')
+                if evidence.get('tc_coupling_bounds') != captured.get('tc_coupling_bounds'):
+                    raise ValueError('Transmon-cavity coupling bounds do not match the captured request.')
                 verified = validate_search_result(evidence, captured['settings'], captured['mode'],
-                                                captured['fidelity_target'], captured.get('vary_cavity', False))
-                if not verified['target_reached']:
-                    raise ValueError('The numerical search did not reach the requested fidelity.')
+                                                captured['fidelity_target'], captured.get('vary_cavity', False), captured.get('tc_coupling_bounds'))
+                if not verified['model_valid']:
+                    raise ValueError('The numerical search has an invalid atomic model.')
                 if proposal['changes'] != verified['changes'] or proposal['evidence'] != 'measured simulation result':
                     raise ValueError('Suggested values do not match the validated target-search result.')
             except (ValueError, TypeError, KeyError) as exc:
